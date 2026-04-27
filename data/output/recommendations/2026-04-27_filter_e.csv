@@ -1,0 +1,6 @@
+date,game_pk,player_id,player_name_x,team,opponent,home_away,lineup_spot,lineup_confirmed,start_rate,exp_pa,batter_hand,pitcher_hand,platoon_advantage,platoon_or_away,pitcher_features_known,pitcher_low_sample,p_model,fair_american,player_name_y,book,over_price,under_price,fetched_at,edge,filter_e_pass
+2026-04-27,823719,656484,Tristan Gray,MIN,SEA,H,9,True,,3.75,L,R,1,1,1,0,0.7509727626459144,-302,Tristan Gray,draftkings,-139,104,2026-04-27T23:19:41.304849+00:00,0.2912409372113204,True
+2026-04-27,823719,670242,Matt Wallner,MIN,SEA,H,8,True,,3.85,L,R,1,1,1,0,0.7052740434332989,-239,Matt Wallner,draftkings,-123,-108,2026-04-27T23:19:41.304849+00:00,0.27866757467988335,True
+2026-04-27,823719,641598,Mitch Garver,SEA,MIN,A,7,True,,4.0,R,L,1,1,1,0,0.7528089887640449,-305,Mitch Garver,draftkings,-159,119,2026-04-27T23:19:41.304849+00:00,0.22627376157162027,True
+2026-04-27,823719,665019,Kody Clemens,MIN,SEA,H,6,True,,4.05,L,R,1,1,1,0,0.7528089887640449,-305,Kody Clemens,draftkings,-161,121,2026-04-27T23:19:41.304849+00:00,0.22039221159885536,True
+2026-04-27,823719,608701,Rob Refsnyder,SEA,MIN,A,1,True,,4.6,R,L,1,1,1,0,0.7509727626459144,-302,Rob Refsnyder,draftkings,-169,127,2026-04-27T23:19:41.304849+00:00,0.19533534409320102,True

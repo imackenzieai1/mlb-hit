@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Schedules scripts/daily_runner.sh twice per day at local time.
+
+  Times (America/Chicago baseline; launchd uses *local* time):
+    10:30 AM CT  - early run, pulls schedule + tentative lineups, scores with prior-season blend.
+    15:30  3:30 PM CT  - late run, re-pulls lineups now that they're confirmed, re-scores.
+
+  Install (one-time):
+
+    cp launchd/com.mlbhit.daily.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.mlbhit.daily.plist
+
+  After editing this file:
+
+    launchctl unload ~/Library/LaunchAgents/com.mlbhit.daily.plist
+    launchctl load   ~/Library/LaunchAgents/com.mlbhit.daily.plist
+
+  IMPORTANT: launchd jobs run as *your user* but with a minimal environment.
+  The runner script invokes the venv python directly (no `source activate`)
+  to avoid PATH / shell-init issues. Logs go to the same dir the script writes to.
+
+  Before loading: edit the REPLACE_ME path below to your actual workspace path.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mlbhit.daily</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/REPLACE_ME/Documents/Claude/Projects/mlb hit/scripts/daily_runner.sh</string>
+    </array>
+
+    <!-- Runs twice per day at the specified local-time minutes. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>10</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>15</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/REPLACE_ME/Documents/Claude/Projects/mlb hit/logs/launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/REPLACE_ME/Documents/Claude/Projects/mlb hit/logs/launchd.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

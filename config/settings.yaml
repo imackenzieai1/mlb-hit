@@ -1,0 +1,27 @@
+paths:
+  data_dir: data
+  db_path: db/tracking.sqlite
+  models_dir: models
+
+filters:
+  # Lowered from 50/100 in v3: rookies and April call-ups were being silently
+  # dropped from batter_season_stats, which cascaded into a 35% starter-row
+  # loss in the modeling parquet. build_batter_features() already shrinks
+  # small-sample xBA toward the league mean (regress(n_prior=100)), so
+  # including low-AB players here is safe — their rows just lean on the prior.
+  min_batter_ab: 1
+  min_pitcher_bf: 1
+
+seasons:
+  train: [2023, 2024]
+  validation: [2025]
+
+rolling:
+  windows_days: [14, 30]
+
+blend_weights:
+  season: 0.7
+  recent: 0.3
+
+edge_threshold: 0.05
+kelly_fraction: 0.0    # v1: flat-stake. Bump to 0.25 later.

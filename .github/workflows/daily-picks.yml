@@ -1,0 +1,152 @@
+name: Daily Picks
+
+# Runs the production pipeline once a day before first pitch, plus on demand
+# from the GitHub UI / mobile app when lineups post mid-afternoon.
+#
+# Cron is in UTC. 11:00 UTC = 7:00 AM ET (EDT) / 6:00 AM ET (EST).
+# Earliest MLB first pitch is ~12:35 PM ET, so 7am leaves a safe pre-game window.
+
+on:
+  schedule:
+    - cron: '0 11 * * *'
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: 'Target date YYYY-MM-DD (leave blank for today)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write   # needed to commit results back to the production branch
+  pages: write
+  id-token: write
+
+concurrency:
+  # Don't let two runs of the same day stomp on each other (e.g. cron + manual).
+  group: daily-picks-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run-picks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      MAILGUN_API_KEY: ${{ secrets.MAILGUN_API_KEY }}
+      MAILGUN_DOMAIN: ${{ secrets.MAILGUN_DOMAIN }}
+      DIGEST_TO: ${{ secrets.DIGEST_TO }}
+      DIGEST_FROM: ${{ secrets.DIGEST_FROM }}
+      TZ: America/New_York
+
+    steps:
+      - name: Check out production branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set target date
+        id: target
+        run: |
+          if [ -n "${{ github.event.inputs.target_date }}" ]; then
+            echo "date=${{ github.event.inputs.target_date }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements-production.txt
+
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-production.txt
+          pip install -e .
+
+      - name: Verify model + features are present
+        run: |
+          test -f models/xgb_v3.joblib || { echo "::error::missing models/xgb_v3.joblib"; exit 1; }
+          test -f models/xgb_v3_recal.joblib || { echo "::error::missing models/xgb_v3_recal.joblib (the calibrated default)"; exit 1; }
+          test -f data/modeling/player_game_features.parquet || \
+            { echo "::error::missing data/modeling/player_game_features.parquet"; exit 1; }
+
+      - name: Fetch today's schedule
+        run: python -m mlbhit.pipeline.fetch_schedule --date ${{ steps.target.outputs.date }}
+
+      - name: Fetch probable starters
+        run: python -m mlbhit.pipeline.fetch_game_starters --season 2026
+
+      - name: Fetch lineups
+        run: python -m mlbhit.pipeline.fetch_lineups --date ${{ steps.target.outputs.date }}
+
+      - name: Score the slate
+        run: |
+          python -m mlbhit.pipeline.score_today \
+            --date ${{ steps.target.outputs.date }} \
+            --season 2026 \
+            --prior-season 2025
+
+      - name: Fetch prop odds
+        run: |
+          python -m mlbhit.pipeline.fetch_prop_odds \
+            --date ${{ steps.target.outputs.date }} \
+            --source theodds
+
+      - name: Generate Filter E recommendations
+        run: |
+          python -m mlbhit.pipeline.recommend \
+            --date ${{ steps.target.outputs.date }} \
+            --filter-e \
+            --require-pitcher
+
+      - name: Build digest payload
+        id: digest
+        run: |
+          python scripts/build_digest.py \
+            --date ${{ steps.target.outputs.date }} \
+            --out digest.html \
+            --out-text digest.txt
+          {
+            echo 'subject<<EOF'
+            head -n 1 digest.txt
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Send email digest
+        if: env.MAILGUN_API_KEY != '' && env.DIGEST_TO != ''
+        run: |
+          python scripts/send_digest.py \
+            --to "$DIGEST_TO" \
+            --from "$DIGEST_FROM" \
+            --subject "${{ steps.digest.outputs.subject }}" \
+            --html digest.html \
+            --attach data/output/recommendations/${{ steps.target.outputs.date }}_filter_e.csv
+
+      - name: Refresh dashboard manifest
+        run: python scripts/build_dashboard_manifest.py
+
+      - name: Commit results back
+        run: |
+          git config user.name  "mlbhit-bot"
+          git config user.email "mlbhit-bot@users.noreply.github.com"
+          git add data/output/recommendations/ docs/manifest.json docs/recommendations/
+          if git diff --cached --quiet; then
+            echo "No new outputs to commit."
+          else
+            git commit -m "picks: ${{ steps.target.outputs.date }} (auto)"
+            git push
+          fi
+
+      - name: Upload run artifacts (CSV + log)
+        uses: actions/upload-artifact@v4
+        with:
+          name: picks-${{ steps.target.outputs.date }}
+          path: |
+            data/output/recommendations/${{ steps.target.outputs.date }}*.csv
+            digest.html
+          if-no-files-found: warn
+          retention-days: 30

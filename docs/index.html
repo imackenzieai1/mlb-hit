@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="MLB Picks" />
+  <title>MLB Picks</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --card: #131c30;
+      --row: #1a2640;
+      --row-alt: #16203a;
+      --text: #eef2ff;
+      --muted: #94a3b8;
+      --accent: #4ade80;
+      --negative: #f87171;
+      --border: #243049;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f7fb;
+        --card: #ffffff;
+        --row: #ffffff;
+        --row-alt: #f3f4f8;
+        --text: #1a1f2e;
+        --muted: #5b6478;
+        --accent: #16a34a;
+        --negative: #dc2626;
+        --border: #e2e6ee;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                   "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      font-size: 15px;
+    }
+    .wrap {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 16px 12px 96px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      margin: 0;
+      letter-spacing: -0.01em;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+      margin: 0 0 16px;
+    }
+    select {
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 14px;
+      padding: 8px 10px;
+    }
+    .summary {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-bottom: 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+    }
+    .summary div span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .summary div strong {
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .row {
+      background: var(--row);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-bottom: 8px;
+    }
+    .row:nth-child(even) { background: var(--row-alt); }
+    .row-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+    }
+    .name {
+      font-weight: 600;
+      font-size: 16px;
+    }
+    .price {
+      font-variant-numeric: tabular-nums;
+      font-size: 15px;
+      color: var(--muted);
+    }
+    .row-bot {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .edge {
+      color: var(--accent);
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+    .edge.neg { color: var(--negative); }
+    .empty {
+      color: var(--muted);
+      text-align: center;
+      padding: 32px 12px;
+    }
+    a.refresh {
+      color: var(--muted);
+      font-size: 13px;
+      text-decoration: none;
+    }
+    a.refresh:hover { color: var(--text); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>MLB Picks</h1>
+      <select id="datePicker" aria-label="Pick a date"></select>
+    </header>
+    <p class="meta" id="meta">loading…</p>
+    <div class="summary" id="summary" hidden></div>
+    <div id="rows"></div>
+    <p class="meta" style="margin-top:24px">
+      <a class="refresh" href="javascript:location.reload()">↻ refresh</a>
+    </p>
+  </div>
+
+  <script>
+    // The dashboard reads the same files the workflow commits — no API calls,
+    // so it works for guests with no rate limit. Manifest is rebuilt each run.
+    const MANIFEST_URL = "manifest.json";
+    // CSVs are mirrored from data/output/recommendations/ into docs/recommendations/
+    // by build_dashboard_manifest.py, because GitHub Pages serves only /docs.
+    const csvUrlForDate = (d) => `recommendations/${d}_filter_e.csv`;
+
+    function fmtPct(x) {
+      const v = parseFloat(x);
+      if (!isFinite(v)) return "";
+      return (v * 100).toFixed(1) + "%";
+    }
+    function fmtPrice(x) {
+      const v = parseInt(x, 10);
+      if (!isFinite(v)) return "";
+      return v > 0 ? `+${v}` : `${v}`;
+    }
+    function csvSplit(line) {
+      // Minimal CSV parser: handles quoted fields with embedded commas.
+      const out = [];
+      let cur = "", inQ = false;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        if (inQ) {
+          if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+          else if (c === '"') { inQ = false; }
+          else { cur += c; }
+        } else {
+          if (c === ",") { out.push(cur); cur = ""; }
+          else if (c === '"') { inQ = true; }
+          else { cur += c; }
+        }
+      }
+      out.push(cur);
+      return out;
+    }
+    function parseCSV(text) {
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      if (!lines.length) return { header: [], rows: [] };
+      const header = csvSplit(lines[0]);
+      const rows = lines.slice(1).map((l) => {
+        const cells = csvSplit(l);
+        return Object.fromEntries(header.map((h, i) => [h, cells[i] ?? ""]));
+      });
+      return { header, rows };
+    }
+    function pick(row, names) {
+      for (const n of names) {
+        if (row[n] !== undefined && row[n] !== "") return row[n];
+      }
+      return "";
+    }
+    function render(date, rows) {
+      document.getElementById("meta").textContent =
+        `${date} · ${rows.length} bet${rows.length === 1 ? "" : "s"}`;
+      const sum = document.getElementById("summary");
+      const rowsEl = document.getElementById("rows");
+      if (!rows.length) {
+        sum.hidden = true;
+        rowsEl.innerHTML = `<div class="empty">No bets cleared Filter E.</div>`;
+        return;
+      }
+      const edges = rows.map((r) => parseFloat(r.edge)).filter(isFinite);
+      const prices = rows.map((r) => parseInt(r.over_price, 10)).filter(isFinite);
+      const avgEdge = edges.reduce((a, b) => a + b, 0) / Math.max(1, edges.length);
+      const avgPrice = prices.reduce((a, b) => a + b, 0) / Math.max(1, prices.length);
+      sum.hidden = false;
+      sum.innerHTML = `
+        <div><span>Bets</span><strong>${rows.length}</strong></div>
+        <div><span>Avg edge</span><strong>${(avgEdge * 100).toFixed(1)}%</strong></div>
+        <div><span>Avg price</span><strong>${avgPrice >= 0 ? "+" : ""}${avgPrice.toFixed(0)}</strong></div>
+      `;
+      rowsEl.innerHTML = rows.map((r) => {
+        // recommend.py's CSV has merge-suffix leakage on player_name and uses
+        // `opponent` instead of `opp_team` — keep the canonical names first so
+        // a future schema cleanup Just Works, but accept the current aliases.
+        const name = pick(r, ["player_name", "player_name_x", "player_name_y", "name"]);
+        const team = pick(r, ["team", "batter_team"]);
+        const opp  = pick(r, ["opp_team", "opponent"]);
+        const ha   = pick(r, ["home_away"]);
+        const haSym = ha === "A" ? "@" : ha === "H" ? "vs" : "·";
+        const edgeVal = parseFloat(r.edge);
+        const edgeCls = isFinite(edgeVal) && edgeVal < 0 ? "edge neg" : "edge";
+        const plat = String(pick(r, ["platoon_advantage"])) === "1" ? " · platoon" : "";
+        return `
+          <div class="row">
+            <div class="row-top">
+              <span class="name">${name || "—"}</span>
+              <span class="price">${fmtPrice(r.over_price)}</span>
+            </div>
+            <div class="row-bot">
+              <span>${team} ${haSym} ${opp}${plat}</span>
+              <span class="${edgeCls}">${fmtPct(r.edge)} edge</span>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+    async function loadDate(date) {
+      const url = csvUrlForDate(date);
+      try {
+        const r = await fetch(url, { cache: "no-cache" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const { rows } = parseCSV(await r.text());
+        render(date, rows);
+      } catch (e) {
+        document.getElementById("meta").textContent = `couldn't load ${date}: ${e.message}`;
+        document.getElementById("rows").innerHTML = "";
+      }
+    }
+    async function init() {
+      let manifest;
+      try {
+        const r = await fetch(MANIFEST_URL, { cache: "no-cache" });
+        manifest = await r.json();
+      } catch (e) {
+        document.getElementById("meta").textContent =
+          "no manifest found — has the workflow run yet?";
+        return;
+      }
+      const sel = document.getElementById("datePicker");
+      (manifest.dates || []).forEach((d) => {
+        const o = document.createElement("option");
+        o.value = d; o.textContent = d;
+        sel.appendChild(o);
+      });
+      const initial = manifest.latest || (manifest.dates || [])[0];
+      if (!initial) {
+        document.getElementById("meta").textContent =
+          "no recommendations on file yet.";
+        return;
+      }
+      sel.value = initial;
+      sel.addEventListener("change", () => loadDate(sel.value));
+      loadDate(initial);
+    }
+    init();
+  </script>
+</body>
+</html>
