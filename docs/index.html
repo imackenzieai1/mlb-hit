@@ -133,6 +133,31 @@
       font-variant-numeric: tabular-nums;
     }
     .edge.neg { color: var(--negative); }
+    /* Outcome badge: ✓ for hit, ✗ for miss, ◦ for void/postponed.
+       Sized to match player-name baseline so the row stays single-line. */
+    .badge {
+      display: inline-block;
+      width: 18px;
+      height: 18px;
+      line-height: 18px;
+      text-align: center;
+      border-radius: 50%;
+      font-size: 11px;
+      font-weight: 700;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .badge.hit  { background: var(--accent);   color: white; }
+    .badge.miss { background: var(--negative); color: white; }
+    .badge.void { background: var(--muted);    color: white; }
+    .pnl {
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      margin-left: 8px;
+    }
+    .pnl.pos { color: var(--accent); }
+    .pnl.neg { color: var(--negative); }
+    .pnl.zero { color: var(--muted); }
     .empty {
       color: var(--muted);
       text-align: center;
@@ -144,6 +169,22 @@
       text-decoration: none;
     }
     a.refresh:hover { color: var(--text); }
+    /* Refresh-picks button: deep-links to the workflow's "Run workflow"
+       page on github.com. From there it's two taps to trigger a re-run.
+       Static pages can't dispatch GitHub Actions directly without putting
+       a token in the page (insecure), so the deep-link is the cleanest path. */
+    a.run-button {
+      display: inline-block;
+      background: var(--accent);
+      color: white;
+      text-decoration: none;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    a.run-button:hover { opacity: 0.9; }
   </style>
 </head>
 <body>
@@ -153,10 +194,14 @@
       <select id="datePicker" aria-label="Pick a date"></select>
     </header>
     <p class="meta" id="meta">loading…</p>
+    <a class="run-button"
+       href="https://github.com/imackenzieai1/mlb-hit/actions/workflows/daily-picks.yml"
+       target="_blank"
+       rel="noopener">⚡ Refresh picks (run workflow)</a>
     <div class="summary" id="summary" hidden></div>
     <div id="rows"></div>
     <p class="meta" style="margin-top:24px">
-      <a class="refresh" href="javascript:location.reload()">↻ refresh</a>
+      <a class="refresh" href="javascript:location.reload()">↻ reload page</a>
     </p>
   </div>
 
@@ -213,6 +258,22 @@
       }
       return "";
     }
+    // Render an outcome badge ("hit"/"miss"/"void") to the left of the
+    // player name. Empty outcome = pending (today or today's not-yet-final);
+    // we render no badge in that case so the row reads as pre-game.
+    function badgeFor(outcome) {
+      if (outcome === "hit")  return `<span class="badge hit"  title="Hit">✓</span>`;
+      if (outcome === "miss") return `<span class="badge miss" title="Miss">✗</span>`;
+      if (outcome === "void") return `<span class="badge void" title="Voided (postponed / scratched / no PA)">◦</span>`;
+      return "";
+    }
+    function fmtPnl(p) {
+      const v = parseFloat(p);
+      if (!isFinite(v) || v === 0) return "";
+      const cls = v > 0 ? "pos" : "neg";
+      const s = v > 0 ? `+$${v.toFixed(2)}` : `-$${Math.abs(v).toFixed(2)}`;
+      return `<span class="pnl ${cls}">${s}</span>`;
+    }
     function render(date, rows) {
       document.getElementById("meta").textContent =
         `${date} · ${rows.length} bet${rows.length === 1 ? "" : "s"}`;
@@ -227,16 +288,39 @@
       const prices = rows.map((r) => parseInt(r.over_price, 10)).filter(isFinite);
       const avgEdge = edges.reduce((a, b) => a + b, 0) / Math.max(1, edges.length);
       const avgPrice = prices.reduce((a, b) => a + b, 0) / Math.max(1, prices.length);
+
+      // Detect graded rows: any row whose `outcome` is hit/miss/void counts
+      // as scored. We compute day totals only when grading is present, so
+      // today's pre-game slate doesn't show a misleading "0 of 5 won".
+      const gradedRows = rows.filter((r) =>
+        r.outcome === "hit" || r.outcome === "miss" || r.outcome === "void"
+      );
+      const isGraded = gradedRows.length > 0;
+      const liveBets = gradedRows.filter((r) => r.outcome !== "void"); // void = book voided
+      const hits = liveBets.filter((r) => r.outcome === "hit").length;
+      const dayPnl = gradedRows
+        .map((r) => parseFloat(r.pnl))
+        .filter(isFinite)
+        .reduce((a, b) => a + b, 0);
+
       sum.hidden = false;
-      sum.innerHTML = `
-        <div><span>Bets</span><strong>${rows.length}</strong></div>
-        <div><span>Avg edge</span><strong>${(avgEdge * 100).toFixed(1)}%</strong></div>
-        <div><span>Avg price</span><strong>${avgPrice >= 0 ? "+" : ""}${avgPrice.toFixed(0)}</strong></div>
-      `;
+      const summaryCells = [
+        `<div><span>Bets</span><strong>${rows.length}</strong></div>`,
+        `<div><span>Avg edge</span><strong>${(avgEdge * 100).toFixed(1)}%</strong></div>`,
+        `<div><span>Avg price</span><strong>${avgPrice >= 0 ? "+" : ""}${avgPrice.toFixed(0)}</strong></div>`,
+      ];
+      if (isGraded && liveBets.length) {
+        const hitRate = (hits / liveBets.length * 100).toFixed(0);
+        const pnlCls = dayPnl > 0 ? "pos" : dayPnl < 0 ? "neg" : "zero";
+        const pnlStr = dayPnl >= 0 ? `+$${dayPnl.toFixed(2)}` : `-$${Math.abs(dayPnl).toFixed(2)}`;
+        summaryCells.push(
+          `<div><span>Day result</span><strong>${hits}/${liveBets.length} (${hitRate}%)</strong></div>`,
+          `<div><span>Day P&L (1u)</span><strong class="pnl ${pnlCls}">${pnlStr}</strong></div>`,
+        );
+      }
+      sum.innerHTML = summaryCells.join("");
+
       rowsEl.innerHTML = rows.map((r) => {
-        // recommend.py's CSV has merge-suffix leakage on player_name and uses
-        // `opponent` instead of `opp_team` — keep the canonical names first so
-        // a future schema cleanup Just Works, but accept the current aliases.
         const name = pick(r, ["player_name", "player_name_x", "player_name_y", "name"]);
         const team = pick(r, ["team", "batter_team"]);
         const opp  = pick(r, ["opp_team", "opponent"]);
@@ -245,11 +329,13 @@
         const edgeVal = parseFloat(r.edge);
         const edgeCls = isFinite(edgeVal) && edgeVal < 0 ? "edge neg" : "edge";
         const plat = String(pick(r, ["platoon_advantage"])) === "1" ? " · platoon" : "";
+        const badge = badgeFor(String(r.outcome || "").trim());
+        const pnlHtml = fmtPnl(r.pnl);
         return `
           <div class="row">
             <div class="row-top">
-              <span class="name">${name || "—"}</span>
-              <span class="price">${fmtPrice(r.over_price)}</span>
+              <span class="name">${badge}${name || "—"}</span>
+              <span class="price">${fmtPrice(r.over_price)}${pnlHtml}</span>
             </div>
             <div class="row-bot">
               <span>${team} ${haSym} ${opp}${plat}</span>
