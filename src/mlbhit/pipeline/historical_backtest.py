@@ -33,19 +33,28 @@ from .fetch_historical_odds import _date_path as historical_odds_path
 
 
 def _odds_path_for_date(d: date) -> Path | None:
-    """Return the on-disk path for a date's props, preferring the historical
-    backfill location and falling back to the live-fetch location.
+    """Return the on-disk path for a date's props, checking all three locations
+    the project has historically used in priority order:
+      1. data/raw/historical_props/{date}_props.parquet  — backfilled history
+      2. data/raw/props/{date}_props.parquet             — current live fetch
+      3. data/raw/{date}_props.parquet                   — legacy live-fetch root
 
-    The live `fetch_prop_odds` writes to `data/raw/{date}_props.parquet`, while
-    `fetch_historical_odds` writes to `data/raw/historical_props/{date}_props.parquet`.
-    Either is fine for backtesting — same schema — so accept whichever exists.
+    First match wins. All three are the same schema, so the backtest can join
+    against whichever exists. The middle path (data/raw/props/) is critical:
+    it's where the production `fetch_prop_odds` writes daily, and dropping it
+    silently caused recent-day backtests to skip 4+ days of odds (the live
+    fetch's home moved from data/raw/ to data/raw/props/ a while back, but
+    this loader was only updated for the legacy root).
     """
     p_hist = historical_odds_path(d)
     if p_hist.exists():
         return p_hist
-    p_live = raw_path("", f"{d.isoformat()}_props.parquet")
+    p_live = raw_path("props", f"{d.isoformat()}_props.parquet")
     if p_live.exists():
         return p_live
+    p_legacy = raw_path("", f"{d.isoformat()}_props.parquet")
+    if p_legacy.exists():
+        return p_legacy
     return None
 
 
@@ -121,16 +130,21 @@ def backtest(
     model_name: str | None = None,
     filter_e: bool = False,
     require_pitcher: bool = False,
-    price_max_negative: int = -200,
+    price_max_negative: int = -240,
 ) -> pd.DataFrame:
     """Score historical odds + features and report ROI.
 
-    `filter_e=True` applies the Filter E v2 gate identically to the one in
-    recommend.py: edge >= 15% AND price >= -200. When enabled, this also
-    overrides `edge_min` to 0.15 internally so the threshold matches the
-    Filter E baseline (raised from 0.08 to 0.15 — the high-edge tail
-    delivered better ROI than the looser gate; this is the target).
-    v2 (2026-04-27) dropped the (away OR platoon) requirement that v1 had.
+    `filter_e=True` applies the Filter E v3 gate (active production, Optuna-
+    tuned): edge >= 11.4% AND price >= -240. When enabled, this also
+    overrides `edge_min` from the bare argparse default (0.05) to 0.11445...
+    so the threshold matches the production gate. Pass an explicit
+    `--edge-min 0.15` to test the v2.1 floor on the same backtest window,
+    or `--legacy-v2-1` from the CLI to flip both knobs together.
+    Lineage:
+      v1 (deprecated)  edge>=0.15, price>=-200, (away OR platoon).
+      v2  (2026-04-27) edge>=0.15, price>=-200. Dropped (away OR platoon).
+      v2.1 (2026-04-29) edge>=0.15, price>=-250.
+      v3  (2026-04-29) edge>=0.114, price>=-240. Optuna joint search winner.
 
     NOTE: the `start_rate` projected-lineup gate from recommend.py has no
     effect here — backtest data is built from boxscores, so every row IS
@@ -144,7 +158,14 @@ def backtest(
     apples-to-apples comparison with the published ROI baseline.
     """
     if filter_e:
-        edge_min = max(edge_min, 0.15)
+        # Filter E's active production edge floor is 0.114... (Optuna v3).
+        # When --filter-e is on with the bare argparse default of 0.05, fall
+        # back to the production floor so "--filter-e by itself = production
+        # gate" still holds. With an explicit non-default --edge-min, respect
+        # the user — passing 0.15 tests the v2.1 floor on the same window,
+        # passing 0.20 tests a tighter gate, etc.
+        if abs(edge_min - 0.05) < 1e-9:
+            edge_min = 0.11445569939746027
 
     odds = _load_historical_odds(start, end)
     if odds.empty:
@@ -359,9 +380,21 @@ if __name__ == "__main__":
         "--filter-e",
         action="store_true",
         help=(
-            "Apply Filter E v2: edge>=15%% & price>=-200. Identical gate to "
-            "recommend.py --filter-e (the 2026-04-27 change dropped the "
-            "(away OR platoon) clause that v1 required)."
+            "Apply Filter E v3 (active production, Optuna-tuned): "
+            "edge>=11.4%% & price>=-240. Pair with --model xgb_v5_recal "
+            "(the active default from predict.DEFAULT_MODEL). Pass "
+            "--legacy-v2-1 to roll back to v2.1 (edge>=15%% & price>=-250 "
+            "with xgb_v3_recal)."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-v2-1",
+        action="store_true",
+        help=(
+            "Roll the Filter E gate AND model back to the prior production "
+            "preset: xgb_v3_recal at edge>=15%% & price>=-250. Validated "
+            "2026-03-20 -> 2026-04-23: +15.9%% ROI / 69.2%% hit. Useful for "
+            "regression-checking new changes against the prior baseline."
         ),
     )
     parser.add_argument(
@@ -376,15 +409,29 @@ if __name__ == "__main__":
     parser.add_argument(
         "--price-min",
         type=int,
-        default=-200,
+        default=-240,
         help=(
-            "Lowest American price allowed when --filter-e is set (default -200). "
-            "Use a more-negative number to admit chalkier picks: e.g. --price-min -250 "
-            "lets in -201..-250, --price-min -1000 effectively removes the cap. "
-            "The price-tier cohort breakdown in the output shows where chalk earns/loses."
+            "Lowest American price allowed when --filter-e is set (active "
+            "default -240, Optuna v3). Use a more-negative number to admit "
+            "chalkier picks: e.g. --price-min -250 reverts to v2.1, "
+            "--price-min -1000 effectively removes the cap. The price-tier "
+            "cohort breakdown shows where chalk earns/loses."
         ),
     )
     args = parser.parse_args()
+
+    # --legacy-v2-1 swaps the model and gate together. Operator can still
+    # override individual knobs after this if they want a partial rollback.
+    if args.legacy_v2_1:
+        if args.model is None:
+            args.model = "xgb_v3_recal"
+        # Only force the gate values if the user didn't explicitly set them.
+        if abs(args.edge_min - 0.05) < 1e-9:
+            args.edge_min = 0.15
+        if args.price_min == -240:
+            args.price_min = -250
+        print("  --legacy-v2-1: rolling back to xgb_v3_recal at Filter E v2.1 "
+              "(edge>=15% & price>=-250). Validated baseline: +15.9% ROI.")
 
     backtest(
         date.fromisoformat(args.start),
