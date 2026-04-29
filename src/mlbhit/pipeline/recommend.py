@@ -38,44 +38,102 @@ IN_PROGRESS_STATUSES = {
 # game does NOT mean the rest of the slate is unbettable.
 POSTPONED_STATUSES = {"Postponed"}
 
-# Filter E thresholds — v2 settings (Ian, 2026-04-27):
-#   * Edge floor 15%, price ceiling -200, start_rate floor 80% for projected
-#     lineups (unchanged from v1).
-#   * v2 change: REMOVED the (away OR platoon advantage) requirement. v1's
-#     gate was a positive ROI contributor in backtest, but it cut bet volume
-#     ~25-40% and Ian preferred the wider slate. Re-validate with a backtest
-#     after each tuning change — see historical_backtest.py --filter-e.
+# Filter E thresholds — v3 settings (Ian, 2026-04-29):
+#   * Edge floor 11.4%, price ceiling -240, start_rate floor 80% for projected
+#     lineups, 2x sizing on hot bats (>0.300 BA over last 6 PA-counted games).
+#   * v3 numbers come from scripts/optuna_joint.py — a 50-trial bounded TPE
+#     search that jointly optimized model hyperparameters AND gate thresholds
+#     against median Filter-E Sharpe across 3 val sub-windows, with a 7-day
+#     held-out holdout never seen by the search. v5_recal is the corresponding
+#     model (see model/predict.py). Holdout: 170 bets, 77.6% hit, +29.7% ROI,
+#     daily-Sharpe 1.99 — strictly dominates v2.1 on the same window.
+#   * Lineage of changes:
+#       v1 (deprecated)  edge>=15%, price>=-200, (away OR platoon), start_rate>=0.80
+#       v2  (2026-04-27) edge>=15%, price>=-200, start_rate>=0.80
+#                         dropped the (away OR platoon) clause to widen slate.
+#       v2.1 (2026-04-29) edge>=15%, price>=-250, start_rate>=0.80
+#                         widened price band after price-tier backtest showed
+#                         -201..-250 was +15.8% ROI / 79.7% hit (74 bets).
+#                         This is the "prior production" preset — pair with
+#                         xgb_v3_recal for the validated rollback config.
+#       v3  (2026-04-29) edge>=11.4%, price>=-240, start_rate>=0.80
+#                         Optuna joint search winner. Same start_rate gate
+#                         (not part of Optuna's search). Pair with xgb_v5_recal.
 # Re-tune these after each meaningful model bump or prop-market shift.
-FILTER_E_EDGE_MIN = 0.15
-FILTER_E_PRICE_MIN = -200  # American: anything >= -200 (i.e. -150, -100, +120, ...)
+
+# --- Active production preset ---
+FILTER_E_EDGE_MIN = 0.11445569939746027   # Optuna best_params["edge_min"]
+FILTER_E_PRICE_MIN = -240                  # Optuna best_params["price_max"]
 
 # Minimum recent start frequency for a projected (un-confirmed) lineup row to
 # clear Filter E. 0.80 = "started 80%+ of the team's last 14 games" — i.e.
 # essentially a regular. 0.50 was the projection threshold (see
 # project_lineups.START_THRESHOLD); 0.80 is the betting threshold. Confirmed
-# rows ignore this gate entirely (start_rate is NA for them).
+# rows ignore this gate entirely (start_rate is NA for them). Not part of
+# Optuna's search space — kept stable at 0.80 across both v2.1 and v3.
 FILTER_E_PROJECTED_MIN_START_RATE = 0.80
 
+# --- Named presets, available for explicit selection ---
+# Pair (model, gate) presets. Default cron uses FILTER_E_PRESET_V3 (Optuna).
+# The v2.1 entry preserves the "prior production no-qualifier" config so we
+# can roll back model + gate together with one flag, not piecemeal — the v3
+# Optuna gate is tighter on price ceiling (-240 vs -250) and looser on edge
+# floor (11.4% vs 15%), so flipping just the model without the gate would
+# be a configuration we never validated.
+FILTER_E_PRESETS = {
+    "v2_1": {
+        "model":           "xgb_v3_recal",
+        "edge_min":        0.15,
+        "price_min":       -250,
+        "start_rate_min":  0.80,
+        "hot_streak_units": 2.0,
+        "description":     ("Prior production (v2.1, 2026-04-29). Validated "
+                            "in Filter E backtest 2026-03-20 -> 2026-04-23: "
+                            "+15.9% ROI / 69.2% hit. Use for rollback."),
+    },
+    "v3": {
+        "model":           "xgb_v5_recal",
+        "edge_min":        0.11445569939746027,
+        "price_min":       -240,
+        "start_rate_min":  0.80,
+        "hot_streak_units": 2.0,
+        "description":     ("Active production (v3, 2026-04-29). Optuna "
+                            "joint search winner. Holdout 2026-04-20 -> 26: "
+                            "+29.7% ROI / 77.6% hit / Sharpe 1.99."),
+    },
+}
+ACTIVE_FILTER_E_PRESET = "v3"
 
-def _passes_filter_e(row) -> bool:
+
+def _passes_filter_e(row, edge_floor: float | None = None,
+                     price_floor: int | None = None) -> bool:
     """Score-and-odds-side gate for Filter E (v2).
 
     Gate components:
-      * edge >= FILTER_E_EDGE_MIN
-      * over_price >= FILTER_E_PRICE_MIN  (chalk price ceiling)
+      * edge >= edge_floor (default FILTER_E_EDGE_MIN)
+      * over_price >= price_floor (default FILTER_E_PRICE_MIN)
       * for projected (unconfirmed) lineups: start_rate >= 0.80
         (confirmed rows skip this — start_rate is NA there)
 
     v1 also required (away OR platoon_advantage); v2 removed that. The
     away/platoon columns are still surfaced in the CSV for ad-hoc filtering,
     just no longer a hard gate.
+
+    edge_floor / price_floor parameters let callers override the production
+    thresholds for ad-hoc analysis (e.g., comparing Optuna's preferred 0.12
+    edge floor against production's 0.15) without mutating module constants.
     """
+    if edge_floor is None:
+        edge_floor = FILTER_E_EDGE_MIN
+    if price_floor is None:
+        price_floor = FILTER_E_PRICE_MIN
+
     if pd.isna(row.get("edge")) or pd.isna(row.get("over_price")):
         return False
-    if row["edge"] < FILTER_E_EDGE_MIN:
+    if row["edge"] < edge_floor:
         return False
     try:
-        if int(row["over_price"]) < FILTER_E_PRICE_MIN:
+        if int(row["over_price"]) < price_floor:
             return False
     except (TypeError, ValueError):
         return False
@@ -107,6 +165,37 @@ def _postponed_game_pks(target_date: date) -> set[int]:
         return set()
     bad = sched[sched["status"].isin(POSTPONED_STATUSES)]
     return set(pd.to_numeric(bad["game_pk"], errors="coerce").dropna().astype(int).tolist())
+
+
+def _load_schedule_for_date(target_date: date) -> pd.DataFrame | None:
+    """Return the schedule parquet for a date, or None if missing."""
+    sched_path = raw_path("schedule", f"{target_date.isoformat()}.parquet")
+    if not sched_path.exists():
+        return None
+    try:
+        return pd.read_parquet(sched_path)
+    except Exception:
+        return None
+
+
+def _format_first_pitch_et(game_datetime_utc) -> str:
+    """Format a UTC ISO datetime as a short Eastern Time string (e.g. '7:05 PM ET').
+    Returns empty string for invalid input.
+
+    NOTE: Uses zoneinfo for proper EDT/EST handling — direct subtraction would
+    silently wrong-shift during DST transitions. This is critical for users
+    who bet near transition boundaries (Mar / Nov).
+    """
+    if game_datetime_utc is None or pd.isna(game_datetime_utc):
+        return ""
+    try:
+        from zoneinfo import ZoneInfo
+        ts = pd.to_datetime(game_datetime_utc, utc=True)
+        et = ts.tz_convert(ZoneInfo("America/New_York"))
+        # %-I strips the leading zero on hour; works on macOS/Linux glibc.
+        return et.strftime("%-I:%M %p ET")
+    except Exception:
+        return ""
 
 
 def _pregame_game_pks(target_date: date) -> set[int] | None:
@@ -149,6 +238,8 @@ def recommend(
     require_confirmed_lineup: bool = False,
     drop_postponed_for_date: date | None = None,
     pre_game_only_for_date: date | None = None,
+    edge_floor: float | None = None,
+    price_floor: int | None = None,
 ) -> pd.DataFrame:
     """Rank +EV recommendations, optionally with Filter E + starter-known gates.
 
@@ -217,14 +308,41 @@ def recommend(
 
     m = preds.merge(prop_prices, on=["date", "player_id"], how="inner")
     m["edge"] = m.apply(lambda r: ev_per_unit(r["p_model"], int(r["over_price"])), axis=1)
-    m["filter_e_pass"] = m.apply(_passes_filter_e, axis=1)
+    m["filter_e_pass"] = m.apply(
+        lambda r: _passes_filter_e(r, edge_floor=edge_floor, price_floor=price_floor),
+        axis=1,
+    )
 
     if filter_e:
         m = m[m["filter_e_pass"]]
     else:
         m = m[m["edge"] >= EDGE_MIN]
 
-    # Surface filter_e_pass at the top so it's visible when scanning the CSV.
+    # Attach first-pitch time per pick. The schedule parquet has game_datetime
+    # in UTC; we surface a human-readable ET string in `first_pitch_et` so the
+    # email digest and dashboard can show "7:05 PM ET" without re-deriving it.
+    # Critical for the user knowing which picks have already locked-in vs which
+    # are evening games still open for action.
+    if drop_postponed_for_date is not None and "game_pk" in m.columns:
+        sched = _load_schedule_for_date(drop_postponed_for_date)
+        if sched is not None and "game_pk" in sched.columns and "game_datetime" in sched.columns:
+            time_map = (
+                sched[["game_pk", "game_datetime"]]
+                .drop_duplicates(subset=["game_pk"], keep="first")
+            )
+            m = m.merge(time_map, on="game_pk", how="left")
+            m["first_pitch_et"] = m["game_datetime"].apply(_format_first_pitch_et)
+            # Sort by first-pitch time so closest games appear first — matters
+            # for the cron's mid-day re-run when some games are minutes from
+            # locking and others are hours away.
+            m["_sort_pitch"] = pd.to_datetime(m["game_datetime"], utc=True, errors="coerce")
+            m = m.sort_values(
+                ["filter_e_pass", "_sort_pitch", "edge"],
+                ascending=[False, True, False],
+            ).drop(columns=["_sort_pitch", "game_datetime"])
+            return m
+
+    # Fallback: no schedule available, sort by edge alone.
     return m.sort_values(["filter_e_pass", "edge"], ascending=[False, False])
 
 
@@ -299,10 +417,22 @@ if __name__ == "__main__":
         "--filter-e",
         action="store_true",
         help=(
-            "Restrict to Filter E (v2): edge>=15%% & price>=-200, plus a "
-            "start_rate>=80%% gate on projected (unconfirmed) lineups. "
-            "v2 (2026-04-27) dropped the (away OR platoon) requirement; "
-            "re-run historical_backtest --filter-e to refresh ROI baseline."
+            "Restrict to Filter E v3 (active production, Optuna-tuned): "
+            "edge>=11.4%% & price>=-240, plus a start_rate>=80%% gate on "
+            "projected (unconfirmed) lineups. Pair with xgb_v5_recal "
+            "(predict.DEFAULT_MODEL). Pass --legacy-v2-1 to roll back to "
+            "the v2.1 gate at edge>=15%% & price>=-250 with xgb_v3_recal."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-v2-1",
+        action="store_true",
+        help=(
+            "Roll back to the prior production preset: xgb_v3_recal at "
+            "Filter E v2.1 (edge>=15%% & price>=-250 with start_rate>=80%%). "
+            "Validated 2026-03-20 -> 2026-04-23: +15.9%% ROI / 69.2%% hit. "
+            "Use only when you want to flip BOTH the model and the gate "
+            "back together — flipping just one is a config we never tested."
         ),
     )
     parser.add_argument(
@@ -351,6 +481,30 @@ if __name__ == "__main__":
             "This is the safe way to do a mid-day re-run — the early window "
             "is dropped (phantom-edge risk), the late window stays bettable. "
             "Implies that the live-slate guard is satisfied for the kept games."
+        ),
+    )
+    parser.add_argument(
+        "--edge-floor",
+        type=float,
+        default=None,
+        help=(
+            "Override the Filter E edge floor (active default 11.4%% from "
+            "Optuna). Use to test alternatives like 0.15 (v2.1 production) or "
+            "0.20 (max conviction) without permanently changing the production "
+            "constant. Backtest-only — for live picks this should match the "
+            "validated production value, or pair with --legacy-v2-1."
+        ),
+    )
+    parser.add_argument(
+        "--price-floor",
+        type=int,
+        default=None,
+        help=(
+            "Override the Filter E price floor (active default -240 from "
+            "Optuna). Use to test alternatives like -250 (v2.1 production), "
+            "-200 (pre-2026-04-29 production) or -300 (extreme chalk "
+            "inclusion). Same warning as --edge-floor: backtest-only knob, "
+            "not for live picks."
         ),
     )
     args = parser.parse_args()
@@ -403,6 +557,30 @@ if __name__ == "__main__":
         if args.filter_e:
             print("  --filter-e requires odds; falling through to top picks by p_model only.")
 
+    # --legacy-v2-1 swaps the gate constants for the v2.1 preset (paired with
+    # xgb_v3_recal). If the predictions parquet was scored with xgb_v5_recal
+    # (the new default), only the gate is rolled back — for a true full
+    # rollback re-run score_today with --model xgb_v3_recal first.
+    if args.legacy_v2_1:
+        legacy = FILTER_E_PRESETS["v2_1"]
+        if args.edge_floor is None:
+            args.edge_floor = legacy["edge_min"]
+        if args.price_floor is None:
+            args.price_floor = legacy["price_min"]
+        print(f"  --legacy-v2-1: applying Filter E v2.1 gate "
+              f"(edge>={legacy['edge_min']:.0%} & price>={legacy['price_min']}). "
+              f"Pair with --model xgb_v3_recal in score_today.py for the "
+              f"validated v2.1 production config.")
+
+    # Surface gate overrides in console output so the user always knows
+    # what thresholds they're looking at — easy to forget when running ad-hoc.
+    eff_edge_floor  = args.edge_floor  if args.edge_floor  is not None else FILTER_E_EDGE_MIN
+    eff_price_floor = args.price_floor if args.price_floor is not None else FILTER_E_PRICE_MIN
+    if args.filter_e:
+        if args.edge_floor is not None or args.price_floor is not None:
+            print(f"  Filter E gate (overridden): "
+                  f"edge>={eff_edge_floor:.0%} & price>={eff_price_floor}")
+
     recs = recommend(
         preds,
         prop_prices=prices,
@@ -411,8 +589,15 @@ if __name__ == "__main__":
         require_confirmed_lineup=args.require_confirmed_lineup,
         drop_postponed_for_date=target_d,
         pre_game_only_for_date=target_d if args.pre_game_only else None,
+        edge_floor=args.edge_floor,
+        price_floor=args.price_floor,
     )
-    label = "FILTER E" if args.filter_e else f"edge>={EDGE_MIN:.0%}"
+    if args.filter_e and (args.edge_floor is not None or args.price_floor is not None):
+        label = f"FILTER E [edge>={eff_edge_floor:.0%}, price>={eff_price_floor}]"
+    elif args.filter_e:
+        label = "FILTER E"
+    else:
+        label = f"edge>={EDGE_MIN:.0%}"
     n_bets = len(recs)
     n_print = n_bets if args.top in (0, None) else min(args.top, n_bets)
     print(f"\n{'=' * 60}\nRECOMMENDATIONS  {d}  ({label})\n{'=' * 60}")
@@ -421,5 +606,15 @@ if __name__ == "__main__":
           f"full list in CSV).")
     if n_bets:
         print(recs.head(n_print).to_string(index=False))
-    suffix = "_filter_e" if args.filter_e else ""
+    # Use a distinct suffix when gate overrides are in effect — otherwise the
+    # experimental run would clobber the production _filter_e.csv on disk
+    # (which feeds grade_picks.py + the dashboard).
+    if args.filter_e and (args.edge_floor is not None or args.price_floor is not None):
+        e_str = f"e{int(round(eff_edge_floor * 100))}"   # 0.12 -> "e12"
+        p_str = f"p{abs(eff_price_floor)}"               # -250 -> "p250"
+        suffix = f"_filter_e_{e_str}_{p_str}"
+    elif args.filter_e:
+        suffix = "_filter_e"
+    else:
+        suffix = ""
     recs.to_csv(output_path("recommendations", f"{d}{suffix}.csv"), index=False)

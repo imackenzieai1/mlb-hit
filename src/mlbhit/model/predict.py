@@ -9,18 +9,28 @@ import pandas as pd
 from ..config import SETTINGS
 from .train import prepare
 
-# Default to v3_recal: same XGBoost trees as xgb_v3, with a fresh isotonic
-# head stacked on top. The original isotonic was fit alongside the trees on
-# 2023-03 → 2025-08 data; xgb_v3_recal refits a post-hoc isotonic on the
-# held-out 2025-08 → 2026-03 window so the calibrator reflects the current
-# offensive environment. Filter E backtest 2026-03-20 → 2026-04-23:
-#   xgb_v3        539 bets   68.5% hit   +15.5% ROI   daily-Sharpe 0.70   worst -48.8%
-#   xgb_v3_recal  558 bets   69.2% hit   +15.9% ROI   daily-Sharpe 0.80   worst -35.8%
-# The ROI bump is modest, but variance reduction is meaningful — the
-# worst-day drawdown shrunk from -49% to -36% and global log-loss /
-# brier improved on the calibration window. v3 is kept as a fallback
-# (--model xgb_v3) for A/B comparisons.
-DEFAULT_MODEL = "xgb_v3_recal"
+# Default to v5_recal: Optuna joint-search winner (see scripts/optuna_joint.py
+# and models/xgb_optuna_winner.json) trained with the v3 feature set, then
+# stacked with a fresh isotonic head on the same 2025-08-01 -> 2026-03-19
+# calibration window v3_recal used. Holdout 2026-04-20 -> 2026-04-26:
+#   xgb_v3_recal  154 bets   71.4% hit   +18.7% ROI   daily-Sharpe 1.02
+#   xgb_v5/optuna 170 bets   77.6% hit   +29.7% ROI   daily-Sharpe 1.99
+# The v5 trees come from a 50-trial bounded search over (max_depth, lr,
+# n_estimators, subsample, colsample_bytree, reg_lambda) that maximized
+# median Filter-E Sharpe across 3 contiguous val sub-windows; holdout was
+# never seen by the search.
+#
+# xgb_v3_recal is kept as the named-fallback prior-production model: it's
+# the validated "no qualifier" production setup at Filter E v2.1 (edge>=15%,
+# price>=-250, start_rate>=80% on projected lineups, 2x sizing on hot bats).
+# Pass --model xgb_v3_recal anywhere a model is selectable to flip back.
+# Don't delete xgb_v3_recal.joblib — it's the rollback artifact.
+DEFAULT_MODEL = "xgb_v5_recal"
+
+# Prior production model — kept available for rollback or A/B comparison.
+# See module docstring at the top of this file for the v2.1 Filter E gate
+# that pairs with this model.
+PRIOR_PROD_MODEL = "xgb_v3_recal"
 
 
 def load_model(name: str = DEFAULT_MODEL):

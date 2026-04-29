@@ -127,6 +127,20 @@
       color: var(--muted);
       font-size: 13px;
     }
+    /* First-pitch tag — small chip next to the team line so the user can see
+       at a glance whether a pick is about to lock vs hours away. */
+    .pitch-time {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text);
+      background: var(--card);
+      border: 1px solid var(--border);
+      padding: 1px 6px;
+      border-radius: 4px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
     .edge {
       color: var(--accent);
       font-weight: 600;
@@ -396,6 +410,13 @@
         const pnlForDisplay = (r.pnl_weighted !== undefined && r.pnl_weighted !== "")
           ? r.pnl_weighted : r.pnl;
         const pnlHtml = fmtPnl(pnlForDisplay);
+        // First-pitch ET label — surfaces game time so user can see "lock in
+        // by 1:35pm vs evening pick at 7:05pm". Empty when schedule data
+        // wasn't available at recommend-time (rare).
+        const firstPitch = pick(r, ["first_pitch_et"]);
+        const pitchHtml = firstPitch
+          ? `<span class="pitch-time" title="First pitch (Eastern Time)">${firstPitch}</span>`
+          : "";
         return `
           <div class="row">
             <div class="row-top">
@@ -403,7 +424,7 @@
               <span class="price">${fmtPrice(r.over_price)}${pnlHtml}</span>
             </div>
             <div class="row-bot">
-              <span>${team} ${haSym} ${opp}${plat}</span>
+              <span>${team} ${haSym} ${opp}${plat}${pitchHtml}</span>
               <span class="${edgeCls}">${fmtPct(r.edge)} edge</span>
             </div>
           </div>

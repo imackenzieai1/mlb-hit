@@ -257,7 +257,7 @@ def _parse_batter_hits_outcomes(event: dict, fetched_at: str) -> list[dict]:
                     "side": out.get("name"),
                     "player_name": out.get("description") or out.get("name"),
                     "price": out.get("price"),
-                    "point": out.get("point", 0.5),
+                    "point": out.get("point"),  # no default — caught by strict filter
                     "fetched_at": fetched_at,
                 })
     return rows
@@ -313,8 +313,35 @@ def fetch_theodds_hit_props(target_date: date) -> pd.DataFrame:
     raw_df = raw_df[raw_df["book"].isin(DEFAULT_BOOKS)].copy()
     print(f"  book filter ({sorted(DEFAULT_BOOKS)}): {len(raw_df):,}/{before:,} rows kept")
 
-    # Keep only the 0.5-line rows (1+ hits prop) — books occasionally list 1.5 / 2.5 too.
-    raw_df = raw_df[raw_df["point"] == 0.5].copy()
+    # Strict point filter: drop any row whose `point` isn't exactly 0.5.
+    # This includes rows with NaN/None point (which the previous default-to-0.5
+    # silently passed through). The-odds-api sometimes returns alternate-line
+    # rows (1.5, 2.5 hits) without an explicit point field — those would
+    # otherwise show up as "1+ hits at +220" which is structurally wrong and
+    # produces phantom edges. Be ruthless here.
+    before = len(raw_df)
+    raw_df = raw_df[raw_df["point"].notna() & (raw_df["point"] == 0.5)].copy()
+    if len(raw_df) < before:
+        print(f"  line filter (point==0.5): {len(raw_df):,}/{before:,} rows kept "
+              f"(dropped {before - len(raw_df)} non-0.5 / null-point rows)")
+
+    # Sanity check: 1+ hit prices for MLB regulars are typically -100 to -300.
+    # If we see a meaningful chunk of rows above +200 (or a price spread that
+    # implies the market wasn't actually 1+ hits), warn loudly. This catches
+    # API regressions and alternate-line leakage that the strict filter missed.
+    if not raw_df.empty:
+        price_num = pd.to_numeric(raw_df["price"], errors="coerce")
+        n_extreme_plus = int((price_num > 200).sum())
+        share_extreme = n_extreme_plus / len(raw_df)
+        if share_extreme > 0.05:
+            print(f"  WARN: {n_extreme_plus}/{len(raw_df)} rows ({share_extreme:.0%}) "
+                  f"show price > +200. Unusual for 1+ hits markets — possible "
+                  f"alternate-lines leakage. Spot-check the output before betting.")
+        # Also flag if median price is unreasonably high
+        median_price = float(price_num.median())
+        if median_price > -80:
+            print(f"  WARN: median price is {median_price:+.0f}, expected near -150. "
+                  f"Possible market-key mismatch from theodds-api.")
 
     # Pivot Over / Under into two price columns on a single row per (player, book).
     pivot = (

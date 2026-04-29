@@ -17,9 +17,19 @@ models/*.joblib
 
 # --- BUT we DO ship these, so the cloud runner can score the slate ---
 # Whitelist the trained model + feature inputs the workflow needs.
+# Active production: xgb_v5_recal (Optuna joint search winner, 2026-04-29).
+# Prior production / rollback: xgb_v3_recal at Filter E v2.1 — kept shipped
+# so `--legacy-v2-1` works on the cron runner without manual artifact pulls.
+!models/xgb_v5.joblib
+!models/xgb_v5.json
+!models/xgb_v5_recal.joblib
 !models/xgb_v3.joblib
 !models/xgb_v3.json
 !models/xgb_v3_recal.joblib
+# Optuna search outputs — kept so eval_optuna_winner.py can run on any
+# checkout without re-running the (~30 min) joint search.
+!models/xgb_optuna.joblib
+!models/xgb_optuna_winner.json
 !data/modeling/
 data/modeling/*
 !data/modeling/player_game_features.parquet

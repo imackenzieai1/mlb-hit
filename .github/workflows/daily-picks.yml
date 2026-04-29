@@ -1,14 +1,26 @@
 name: Daily Picks
 
-# Runs the production pipeline once a day before first pitch, plus on demand
-# from the GitHub UI / mobile app when lineups post mid-afternoon.
+# Runs the production pipeline twice a day, sized to actually catch real
+# market state (not 7am opener junk):
 #
-# Cron is in UTC. 11:00 UTC = 7:00 AM ET (EDT) / 6:00 AM ET (EST).
-# Earliest MLB first pitch is ~12:35 PM ET, so 7am leaves a safe pre-game window.
-
+#   15:00 UTC = 11:00 AM ET (EDT) — early-day slate.
+#     By this hour: probable pitchers all announced, lineups posting for
+#     1pm ET first pitches, books have priced most/all 15 games (vs ~4 at
+#     7am), and morning opener mispricings have been hit by sharps so
+#     prices reflect real market state.
+#
+#   19:00 UTC = 3:00 PM ET (EDT) — evening slate refresh.
+#     Catches lineups for 4pm and 7pm ET first pitches as they post, plus
+#     any odds that moved during the afternoon. The 1pm games will already
+#     be in progress — the recommend script's --pre-game-only flag drops
+#     those automatically without erroring.
+#
+# Manual workflow_dispatch is also supported (Actions tab → Run workflow)
+# for ad-hoc reruns or backfills.
 on:
   schedule:
-    - cron: '0 11 * * *'
+    - cron: '0 15 * * *'   # 11 AM ET — early-day games (lineups posting, books all priced)
+    - cron: '0 19 * * *'   # 3 PM ET — evening refresh (4pm + 7pm lineup confirms)
   workflow_dispatch:
     inputs:
       target_date:
