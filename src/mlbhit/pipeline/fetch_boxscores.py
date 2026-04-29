@@ -137,14 +137,74 @@ def run_season(season: int) -> pd.DataFrame:
     return df
 
 
+def update_season(season: int) -> pd.DataFrame:
+    """Incremental update: read existing boxscores_{season}.parquet, fetch
+    only the days strictly AFTER its most recent date through yesterday,
+    and append. Skips re-iterating the entire season (which makes the cron
+    take 25+ minutes on a fresh runner).
+
+    Falls back to ``run_season`` when the parquet doesn't exist yet — first-run
+    bootstrap still has to populate the full season once.
+    """
+    out = clean_path(f"boxscores_{season}.parquet")
+    if not out.exists():
+        print(f"[{season}] no existing parquet at {out} — bootstrapping full season")
+        return run_season(season)
+
+    existing = pd.read_parquet(out)
+    if existing.empty:
+        print(f"[{season}] existing parquet is empty — bootstrapping")
+        return run_season(season)
+
+    # Determine the most recent date already on disk and start fetching the
+    # next day. Stop at min(yesterday, season_end) so we never request future
+    # dates the API doesn't have data for yet.
+    last_str = pd.to_datetime(existing["date"]).max()
+    last_d = last_str.date() if hasattr(last_str, "date") else last_str
+    fetch_start = last_d + (date.fromordinal(last_d.toordinal() + 1) - last_d)
+    today = date.today()
+    yesterday = date.fromordinal(today.toordinal() - 1)
+    season_end = date(season, 11, 5)
+    fetch_end = min(yesterday, season_end)
+
+    if fetch_start > fetch_end:
+        print(f"[{season}] up-to-date through {last_d.isoformat()}; nothing to fetch.")
+        return existing
+
+    print(f"[{season}] existing parquet ends {last_d.isoformat()}; "
+          f"fetching {fetch_start.isoformat()} -> {fetch_end.isoformat()}")
+    new_df = fetch_range(fetch_start, fetch_end)
+    if new_df.empty:
+        print(f"[{season}] no new rows in fetch window.")
+        return existing
+
+    combined = pd.concat([existing, new_df], ignore_index=True)
+    # Defensive dedup: in case the new fetch overlaps a partial day already on
+    # disk (e.g. the parquet was written mid-game), prefer the freshest row.
+    combined = combined.drop_duplicates(
+        subset=["date", "game_pk", "player_id"], keep="last"
+    )
+    combined.to_parquet(out, index=False)
+    print(f"[{season}] rows: {len(existing):,} + {len(new_df):,} new -> "
+          f"{len(combined):,} total  ({out})")
+    return combined
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--season", type=int, required=True)
-    parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Force-refetch the entire season ignoring the per-day cache.")
+    parser.add_argument("--update", action="store_true",
+                        help=("Incremental mode: only fetch days AFTER the existing "
+                              "parquet's most recent date. Use this in the daily cron — "
+                              "10x faster than --season alone on a fresh runner."))
     args = parser.parse_args()
     if args.no_cache:
         df = fetch_range(date(args.season, 3, 20), date(args.season, 11, 5), use_cache=False)
         df.to_parquet(clean_path(f"boxscores_{args.season}.parquet"), index=False)
         print(df.shape, df["got_hit"].mean() if not df.empty else "empty")
+    elif args.update:
+        update_season(args.season)
     else:
         run_season(args.season)

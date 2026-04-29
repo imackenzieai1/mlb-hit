@@ -140,10 +140,12 @@ jobs:
             --attach data/output/recommendations/${{ steps.target.outputs.date }}_filter_e.csv
 
       - name: Refresh boxscores cache (yesterday's results)
-        # Pulls any new finals into data/clean/boxscores_${SEASON}.parquet so
-        # grade_picks can score yesterday's recs. Idempotent — re-uses the
-        # per-day cache for dates already on disk.
-        run: python -m mlbhit.pipeline.fetch_boxscores --season 2026
+        # --update is incremental: reads the existing boxscores_2026.parquet,
+        # finds its most recent date, and only fetches the gap to yesterday.
+        # On a fresh runner with the parquet shipped through the prior day's
+        # data, this is ~1 day = ~5 sec, vs the ~25 min full-season rebuild
+        # we'd hit otherwise.
+        run: python -m mlbhit.pipeline.fetch_boxscores --season 2026 --update
 
       - name: Grade past Filter E recommendations
         # In-place adds outcome/pnl columns to each historical CSV so the
