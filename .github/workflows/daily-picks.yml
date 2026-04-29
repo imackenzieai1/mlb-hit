@@ -110,11 +110,17 @@ jobs:
             --source theodds
 
       - name: Generate Filter E recommendations
+        # --pre-game-only: if any games on the target date have already
+        # started (cron drifted late, or someone manually triggered
+        # mid-day), filter to only the games still pre-first-pitch
+        # rather than refusing the whole slate. Safe no-op when every
+        # game is still pre-game (which is the normal cron case at 11 UTC).
         run: |
           python -m mlbhit.pipeline.recommend \
             --date ${{ steps.target.outputs.date }} \
             --filter-e \
-            --require-pitcher
+            --require-pitcher \
+            --pre-game-only
 
       - name: Build digest payload
         id: digest
