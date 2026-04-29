@@ -25,7 +25,7 @@ from .train import prepare
 # price>=-250, start_rate>=80% on projected lineups, 2x sizing on hot bats).
 # Pass --model xgb_v3_recal anywhere a model is selectable to flip back.
 # Don't delete xgb_v3_recal.joblib — it's the rollback artifact.
-DEFAULT_MODEL = "xgb_v3_recal"
+DEFAULT_MODEL = "xgb_v5_recal"
 
 # Prior production model — kept available for rollback or A/B comparison.
 # See module docstring at the top of this file for the v2.1 Filter E gate

@@ -62,8 +62,8 @@ POSTPONED_STATUSES = {"Postponed"}
 # Re-tune these after each meaningful model bump or prop-market shift.
 
 # --- Active production preset ---
-FILTER_E_EDGE_MIN = 0.15
-FILTER_E_PRICE_MIN = -250
+FILTER_E_EDGE_MIN = 0.11445569939746027
+FILTER_E_PRICE_MIN = -240
 
 # Minimum recent start frequency for a projected (un-confirmed) lineup row to
 # clear Filter E. 0.80 = "started 80%+ of the team's last 14 games" — i.e.
