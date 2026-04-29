@@ -81,9 +81,9 @@ jobs:
             data/clean/pitcher_rolling.parquet \
             data/clean/players.parquet \
             data/clean/bullpen_features.parquet \
-            data/clean/stadiums.csv \
             data/clean/boxscores_2026.parquet \
-            data/clean/game_starters_2026.parquet ; do
+            data/clean/game_starters_2026.parquet \
+            config/stadiums.csv ; do
             test -f "$f" || { echo "::error::missing $f"; exit 1; }
           done
 

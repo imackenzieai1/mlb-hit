@@ -34,7 +34,6 @@ data/modeling/*
 data/clean/*
 data/clean/daily_boxscores/
 data/clean/game_starters_cache/
-!data/clean/stadiums.csv
 !data/clean/boxscores_*.parquet
 !data/clean/batter_season_stats.parquet
 !data/clean/pitcher_season_stats.parquet
