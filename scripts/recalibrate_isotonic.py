@@ -49,6 +49,8 @@ from mlbhit.model.recalibrated import StackedCalibratedModel
 RECAL_START = "2025-08-01"
 RECAL_END   = "2026-03-19"
 
+# Defaults match the original v3 recal. Override via --base-model on the CLI
+# to recalibrate v4 (or any future model) without editing this file.
 BASE_MODEL = "xgb_v3"
 OUT_NAME   = "xgb_v3_recal"
 
@@ -76,8 +78,24 @@ def _calibration_curve(p, y, n_bins=10) -> pd.DataFrame:
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--base-model", default=BASE_MODEL,
+        help=("Base model name (defaults to xgb_v3). "
+              "Pass xgb_v4 to recalibrate the v4 model."),
+    )
+    parser.add_argument(
+        "--out-name", default=None,
+        help="Output model name. Defaults to '{base-model}_recal'.",
+    )
+    args = parser.parse_args()
+
+    base_model_name = args.base_model
+    out_name = args.out_name or f"{base_model_name}_recal"
+
     print("=" * 80)
-    print(f"RECALIBRATING {BASE_MODEL} -> {OUT_NAME}")
+    print(f"RECALIBRATING {base_model_name} -> {out_name}")
     print("=" * 80)
     print(f"  calibration window: {RECAL_START} -> {RECAL_END}")
     print()
@@ -94,8 +112,8 @@ def main():
     print()
 
     # 2. Score with the existing model
-    print(f"  scoring calibration window with {BASE_MODEL}...")
-    p_old = predict(df, name=BASE_MODEL).values
+    print(f"  scoring calibration window with {base_model_name}...")
+    p_old = predict(df, name=base_model_name).values
     y = df["got_hit"].astype(int).values
     print(f"  avg p_model (before recal): {p_old.mean():.4f}")
     print(f"  bias (p - actual):          {p_old.mean() - y.mean():+.4f}")
@@ -128,12 +146,12 @@ def main():
     print()
 
     # 6. Wrap and save
-    base_model, features = load_model(BASE_MODEL)
+    base_model, features = load_model(base_model_name)
     stacked = StackedCalibratedModel(
         base=base_model,
         isotonic=iso,
         recal_meta={
-            "base_model":           BASE_MODEL,
+            "base_model":           base_model_name,
             "recal_window_start":   RECAL_START,
             "recal_window_end":     RECAL_END,
             "n_calibration_rows":   int(len(df)),
@@ -144,15 +162,15 @@ def main():
         },
     )
 
-    out_path = Path(SETTINGS["paths"]["models_dir"]) / f"{OUT_NAME}.joblib"
+    out_path = Path(SETTINGS["paths"]["models_dir"]) / f"{out_name}.joblib"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump({"model": stacked, "features": features}, out_path)
     print(f"  saved: {out_path}")
     print()
     print("Next:")
     print(f"  python -m mlbhit.pipeline.historical_backtest \\")
-    print(f"    --start 2026-03-20 --end 2026-04-23 \\")
-    print(f"    --filter-e --require-pitcher --model {OUT_NAME}")
+    print(f"    --start 2026-03-20 --end 2026-04-26 \\")
+    print(f"    --filter-e --require-pitcher --model {out_name}")
 
 
 if __name__ == "__main__":

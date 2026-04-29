@@ -150,6 +150,26 @@
     .badge.hit  { background: var(--accent);   color: white; }
     .badge.miss { background: var(--negative); color: white; }
     .badge.void { background: var(--muted);    color: white; }
+    /* Hot-streak indicator: a small flame next to the player name when the
+       batter hit > .300 across his last 6 PA-counted games. Independent of
+       outcome (a hot bat can still miss). The recommendation is 2u stake. */
+    .hot-flag {
+      display: inline-block;
+      margin-left: 4px;
+      font-size: 13px;
+      vertical-align: middle;
+    }
+    .units-tag {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--accent);
+      background: rgba(74, 222, 128, 0.12);
+      padding: 1px 5px;
+      border-radius: 4px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
     .pnl {
       font-variant-numeric: tabular-nums;
       font-weight: 600;
@@ -298,24 +318,51 @@
       const isGraded = gradedRows.length > 0;
       const liveBets = gradedRows.filter((r) => r.outcome !== "void"); // void = book voided
       const hits = liveBets.filter((r) => r.outcome === "hit").length;
-      const dayPnl = gradedRows
+      // Day P&L at flat $1: sum of `pnl`. Day P&L with recommended sizing:
+      // sum of `pnl_weighted` (which grade_picks.py writes as pnl * units).
+      // The dashboard prefers the weighted view since 2u sizing on hot bats
+      // is the validated policy (cohort backtest 2026-04-27).
+      const dayPnlFlat = gradedRows
         .map((r) => parseFloat(r.pnl))
         .filter(isFinite)
         .reduce((a, b) => a + b, 0);
+      const dayPnlWeighted = gradedRows
+        .map((r) => {
+          const w = parseFloat(r.pnl_weighted);
+          return isFinite(w) ? w : parseFloat(r.pnl);
+        })
+        .filter(isFinite)
+        .reduce((a, b) => a + b, 0);
+      // How many bets at 2u? Used in the summary to surface the sizing mix.
+      const hotCount = rows.filter((r) =>
+        String(r.hot_streak || "").trim() === "1"
+      ).length;
 
       sum.hidden = false;
       const summaryCells = [
-        `<div><span>Bets</span><strong>${rows.length}</strong></div>`,
+        `<div><span>Bets</span><strong>${rows.length}${
+          hotCount ? ` <span style="font-size:13px;color:var(--accent);">(${hotCount}🔥@2u)</span>` : ""
+        }</strong></div>`,
         `<div><span>Avg edge</span><strong>${(avgEdge * 100).toFixed(1)}%</strong></div>`,
         `<div><span>Avg price</span><strong>${avgPrice >= 0 ? "+" : ""}${avgPrice.toFixed(0)}</strong></div>`,
       ];
       if (isGraded && liveBets.length) {
         const hitRate = (hits / liveBets.length * 100).toFixed(0);
-        const pnlCls = dayPnl > 0 ? "pos" : dayPnl < 0 ? "neg" : "zero";
-        const pnlStr = dayPnl >= 0 ? `+$${dayPnl.toFixed(2)}` : `-$${Math.abs(dayPnl).toFixed(2)}`;
+        const pnlCls = dayPnlWeighted > 0 ? "pos" : dayPnlWeighted < 0 ? "neg" : "zero";
+        const pnlStr = dayPnlWeighted >= 0
+          ? `+$${dayPnlWeighted.toFixed(2)}`
+          : `-$${Math.abs(dayPnlWeighted).toFixed(2)}`;
+        // Show flat baseline as a small subtitle so we can see the lift
+        // 2u sizing actually delivered on this date.
+        const flatStr = dayPnlFlat >= 0
+          ? `+$${dayPnlFlat.toFixed(2)}`
+          : `-$${Math.abs(dayPnlFlat).toFixed(2)}`;
+        const showLift = Math.abs(dayPnlFlat - dayPnlWeighted) > 0.005;
         summaryCells.push(
           `<div><span>Day result</span><strong>${hits}/${liveBets.length} (${hitRate}%)</strong></div>`,
-          `<div><span>Day P&L (1u)</span><strong class="pnl ${pnlCls}">${pnlStr}</strong></div>`,
+          `<div><span>Day P&L</span><strong class="pnl ${pnlCls}">${pnlStr}</strong>${
+            showLift ? `<div style="font-size:11px;color:var(--muted);margin-top:2px;">(flat $1: ${flatStr})</div>` : ""
+          }</div>`,
         );
       }
       sum.innerHTML = summaryCells.join("");
@@ -330,11 +377,29 @@
         const edgeCls = isFinite(edgeVal) && edgeVal < 0 ? "edge neg" : "edge";
         const plat = String(pick(r, ["platoon_advantage"])) === "1" ? " · platoon" : "";
         const badge = badgeFor(String(r.outcome || "").trim());
-        const pnlHtml = fmtPnl(r.pnl);
+        // Hot-streak indicator: only show 🔥 + 2u tag when batter cleared the
+        // 6-game >.300 threshold. recent_form.attach_hot_streak guarantees
+        // hot_streak=1 implies recommended_units=2.0, so they always co-occur.
+        const isHot = String(r.hot_streak || "").trim() === "1";
+        const hotHtml = isHot
+          ? `<span class="hot-flag" title="Hit > .300 over last 6 games">🔥</span><span class="units-tag">2u</span>`
+          : "";
+        // Grind indicator (flag-only for now — n=35 in backtest, signal real
+        // but undersized; we surface but don't size on it yet).
+        const isGrind = String(r.opp_grind || "").trim() === "1";
+        const grindHtml = isGrind
+          ? `<span class="hot-flag" title="Opp on 11+ consecutive games (bullpen grind)">⚙️</span>`
+          : "";
+        // Use weighted pnl for the per-row display when present (it's what
+        // we actually made at recommended sizing). Falls back to flat pnl
+        // for rows graded before the weighted column existed.
+        const pnlForDisplay = (r.pnl_weighted !== undefined && r.pnl_weighted !== "")
+          ? r.pnl_weighted : r.pnl;
+        const pnlHtml = fmtPnl(pnlForDisplay);
         return `
           <div class="row">
             <div class="row-top">
-              <span class="name">${badge}${name || "—"}</span>
+              <span class="name">${badge}${name || "—"}${hotHtml}${grindHtml}</span>
               <span class="price">${fmtPrice(r.over_price)}${pnlHtml}</span>
             </div>
             <div class="row-bot">

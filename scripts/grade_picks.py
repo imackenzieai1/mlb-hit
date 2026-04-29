@@ -33,8 +33,10 @@ BOX_DIR = REPO_ROOT / "data" / "clean"
 DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_filter_e\.csv$")
 
 # Columns this script writes. Defined here so we can detect partially-graded
-# CSVs and only re-grade pending rows.
-GRADE_COLS = ["outcome", "hits_actual", "pnl"]
+# CSVs and only re-grade pending rows. `pnl` is flat-$1 P&L; `pnl_weighted`
+# applies the row's `recommended_units` multiplier (2x on hot bats by default,
+# 1x otherwise — see src/mlbhit/features/recent_form.py).
+GRADE_COLS = ["outcome", "hits_actual", "pnl", "pnl_weighted"]
 
 
 def _payout_per_unit(odds_american: int) -> float:
@@ -113,7 +115,12 @@ def grade_one(csv_path: Path, today: date) -> tuple[int, int, float]:
         return 0, 0, 0.0
 
     # Initialize grade columns if missing (preserves existing graded rows).
-    for col, default in (("outcome", ""), ("hits_actual", pd.NA), ("pnl", 0.0)):
+    for col, default in (
+        ("outcome", ""),
+        ("hits_actual", pd.NA),
+        ("pnl", 0.0),
+        ("pnl_weighted", 0.0),
+    ):
         if col not in df.columns:
             df[col] = default
 
@@ -134,9 +141,19 @@ def grade_one(csv_path: Path, today: date) -> tuple[int, int, float]:
             continue
         outcome, hits_actual, pnl = _grade_row(row, box_day)
         if outcome:
+            # Apply the row's recommended_units multiplier if present, else
+            # 1.0 (so legacy rows graded before the column existed still
+            # produce a sensible pnl_weighted = pnl).
+            try:
+                units = float(row.get("recommended_units", 1.0))
+                if pd.isna(units) or units <= 0:
+                    units = 1.0
+            except (TypeError, ValueError):
+                units = 1.0
             df.at[i, "outcome"] = outcome
             df.at[i, "hits_actual"] = hits_actual if hits_actual is not None else pd.NA
             df.at[i, "pnl"] = pnl
+            df.at[i, "pnl_weighted"] = pnl * units
             newly_graded += 1
 
     df.to_csv(csv_path, index=False)

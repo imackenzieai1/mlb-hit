@@ -71,6 +71,38 @@ _ROLLING_FEATURES = [
     "sp_contact_pct_allowed_14d", "sp_contact_pct_allowed_30d",
 ]
 
+# v4 (2026-04-27): adds recent-form features. Two sources:
+#   1) Game-window rolling features from rolling.py's _roll_sum_games — same
+#      shape as the 14d/30d set but counted in PA-games not calendar days.
+#      Run `python -m mlbhit.features.rolling --game-windows 3 10` to produce
+#      these in batter_rolling.parquet, then rebuild build_features.
+#   2) Sizing-context features from scripts/build_v4_features.py, which uses
+#      boxscores directly:
+#        * hot_streak_avg    — last-6-game BA (continuous)
+#        * opp_consec_games  — opp team's calendar-day consecutive-games streak
+_RECENT_FORM_FEATURES = [
+    # From rolling.py (game-windowed companions to 14d/30d):
+    "PA_3g", "PA_10g",
+    "ba_3g", "ba_10g",
+    "xba_3g", "xba_10g",
+    "hard_hit_pct_3g", "hard_hit_pct_10g",
+    "sweet_spot_pct_3g", "sweet_spot_pct_10g",
+    # From build_v4_features.py (boxscore-derived):
+    "hot_streak_avg",
+    "opp_consec_games",
+]
+
+
+def features_for(model_name: str) -> list[str]:
+    """Return the FEATURES list for a given model name. Lets v3 and v4 coexist."""
+    base = _SEASON_FEATURES + _ROLLING_FEATURES
+    if model_name.startswith("xgb_v4"):
+        return base + _RECENT_FORM_FEATURES
+    return base
+
+
+# Default FEATURES list (v3) — kept as module-level constant for backwards
+# compatibility with anything that imports `train.FEATURES` directly.
 FEATURES = _SEASON_FEATURES + _ROLLING_FEATURES
 
 MONO = {
@@ -120,29 +152,55 @@ MONO = {
     "sp_contact_pct_allowed_30d": +1,
     # PA_14d / PA_30d / TBF_14d / TBF_30d intentionally unconstrained — more
     # exposure = more signal but doesn't monotonically push p(hit) either way.
+    # v4 recent-form features:
+    "hot_streak_avg":      +1,   # higher last-6 BA → more likely to hit today
+    "ba_3g":               +1,   # same logic on a 3-game window
+    "ba_10g":              +1,   # same logic on a 10-game window
+    "xba_3g":              +1,   # expected BA tracks true talent more cleanly
+    "xba_10g":             +1,
+    "hard_hit_pct_3g":     +1,   # contact quality drives hits-allowed
+    "hard_hit_pct_10g":    +1,
+    "sweet_spot_pct_3g":   +1,
+    "sweet_spot_pct_10g":  +1,
+    # opp_consec_games and PA_*g intentionally unconstrained — fatigue
+    # direction is plausible but uncertain at our volumes (n=35 grind cohort);
+    # PA exposure is signal-of-signal not signal itself. Let XGB find them.
 }
 
 
-def prepare(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+def prepare(df: pd.DataFrame, features: list[str] | None = None) -> tuple[pd.DataFrame, pd.Series]:
+    """Build (X, y) for training.
+
+    Pass ``features=features_for(model_name)`` to use a non-default feature set
+    (e.g., v4's expanded set). Defaults to the module-level FEATURES (v3) for
+    backwards compat.
+    """
+    if features is None:
+        features = FEATURES
     df = df.copy()
     df["home_away_is_home"] = (df["home_away"] == "H").astype(int)
     df["batting_order"] = df["batting_order"].fillna(5).astype(int)
-    for c in FEATURES:
+    for c in features:
         if c not in df.columns:
             df[c] = np.nan  # was 0.0 — NaN lets XGBoost route missing cleanly.
 
-    # Median-fill season-level features only. Rolling features keep their NaNs
-    # so that "no recent form" stays distinct from "form = league median".
-    X = df[FEATURES].copy()
-    season_medians = X[_SEASON_FEATURES].median(numeric_only=True)
-    X[_SEASON_FEATURES] = X[_SEASON_FEATURES].fillna(season_medians)
+    # Median-fill season-level features only. Rolling and recent-form features
+    # keep their NaNs so that "no recent form" stays distinct from "form =
+    # league median".
+    X = df[features].copy()
+    season_cols = [c for c in _SEASON_FEATURES if c in features]
+    if season_cols:
+        season_medians = X[season_cols].median(numeric_only=True)
+        X[season_cols] = X[season_cols].fillna(season_medians)
 
     y = df["got_hit"].astype(int)
     return X, y
 
 
-def monotone_tuple() -> tuple[int, ...]:
-    return tuple(MONO.get(f, 0) for f in FEATURES)
+def monotone_tuple(features: list[str] | None = None) -> tuple[int, ...]:
+    if features is None:
+        features = FEATURES
+    return tuple(MONO.get(f, 0) for f in features)
 
 
 def train(
@@ -152,7 +210,8 @@ def train(
     calibration: str = "isotonic",
 ) -> dict:
     df = df.sort_values("date").reset_index(drop=True)
-    X, y = prepare(df)
+    features = features_for(model_name)
+    X, y = prepare(df, features=features)
     split = int(len(df) * (1 - val_frac))
     X_tr, y_tr = X.iloc[:split], y.iloc[:split]
     X_val, y_val = X.iloc[split:], y.iloc[split:]
@@ -167,7 +226,7 @@ def train(
         eval_metric="logloss",
         tree_method="hist",
         n_jobs=-1,
-        monotone_constraints=monotone_tuple(),
+        monotone_constraints=monotone_tuple(features),
     )
     if calibration not in ("isotonic", "sigmoid"):
         raise ValueError(f"calibration must be 'isotonic' or 'sigmoid'; got {calibration!r}")
@@ -190,10 +249,10 @@ def train(
     out_model = Path(SETTINGS["paths"]["models_dir"]) / f"{model_name}.joblib"
     out_meta = Path(SETTINGS["paths"]["models_dir"]) / f"{model_name}.json"
     out_model.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump({"model": calibrated, "features": FEATURES}, out_model)
+    joblib.dump({"model": calibrated, "features": features}, out_model)
     with open(out_meta, "w") as f:
         json.dump(
-            {"features": FEATURES, "metrics": metrics, "monotone": MONO,
+            {"features": features, "metrics": metrics, "monotone": MONO,
              "calibration": calibration},
             f, indent=2,
         )

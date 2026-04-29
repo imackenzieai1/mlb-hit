@@ -38,15 +38,13 @@ IN_PROGRESS_STATUSES = {
 # game does NOT mean the rest of the slate is unbettable.
 POSTPONED_STATUSES = {"Postponed"}
 
-# Filter E thresholds — v1 settings (Ian, 2026-04-25):
-#   * Edge floor raised from 8% to 15%. The 8% gate produced +14.1% ROI on
-#     YTD with ~28 bets/day; the high-edge tail (>=20%) hit +15.6%. 15% is
-#     the sweet spot between sample and conviction — fewer, surer bets.
-#   * OR gate retained: away OR platoon advantage. Both halves contribute
-#     positive YTD ROI individually; the OR keeps the slate diversified.
-#   * Price ceiling unchanged at -200.
-#   * Projected lineups (lineup_confirmed=False) additionally require
-#     start_rate >= FILTER_E_PROJECTED_MIN_START_RATE — see below.
+# Filter E thresholds — v2 settings (Ian, 2026-04-27):
+#   * Edge floor 15%, price ceiling -200, start_rate floor 80% for projected
+#     lineups (unchanged from v1).
+#   * v2 change: REMOVED the (away OR platoon advantage) requirement. v1's
+#     gate was a positive ROI contributor in backtest, but it cut bet volume
+#     ~25-40% and Ian preferred the wider slate. Re-validate with a backtest
+#     after each tuning change — see historical_backtest.py --filter-e.
 # Re-tune these after each meaningful model bump or prop-market shift.
 FILTER_E_EDGE_MIN = 0.15
 FILTER_E_PRICE_MIN = -200  # American: anything >= -200 (i.e. -150, -100, +120, ...)
@@ -60,11 +58,17 @@ FILTER_E_PROJECTED_MIN_START_RATE = 0.80
 
 
 def _passes_filter_e(row) -> bool:
-    """Score-and-odds-side gate for Filter E.
+    """Score-and-odds-side gate for Filter E (v2).
 
-    score_today.py already exposes `platoon_or_away` (away OR platoon advantage).
-    Here we add the odds-dependent half: edge floor + price ceiling on chalk +
-    a start-rate floor for projected (unconfirmed) lineup rows.
+    Gate components:
+      * edge >= FILTER_E_EDGE_MIN
+      * over_price >= FILTER_E_PRICE_MIN  (chalk price ceiling)
+      * for projected (unconfirmed) lineups: start_rate >= 0.80
+        (confirmed rows skip this — start_rate is NA there)
+
+    v1 also required (away OR platoon_advantage); v2 removed that. The
+    away/platoon columns are still surfaced in the CSV for ad-hoc filtering,
+    just no longer a hard gate.
     """
     if pd.isna(row.get("edge")) or pd.isna(row.get("over_price")):
         return False
@@ -87,9 +91,7 @@ def _passes_filter_e(row) -> bool:
         except (TypeError, ValueError):
             return False
 
-    away = str(row.get("home_away", "")) == "A"
-    plat = int(row.get("platoon_advantage", 0) or 0) == 1
-    return away or plat
+    return True
 
 
 def _postponed_game_pks(target_date: date) -> set[int]:
@@ -297,9 +299,10 @@ if __name__ == "__main__":
         "--filter-e",
         action="store_true",
         help=(
-            "Restrict to Filter E: edge>=15%% & price>=-200 & (away OR platoon "
-            "advantage). Backtested at +15.9%% ROI / 69.2%% hit rate (xgb_v3_recal, "
-            "2026-03-20 to 2026-04-23, 558 bets)."
+            "Restrict to Filter E (v2): edge>=15%% & price>=-200, plus a "
+            "start_rate>=80%% gate on projected (unconfirmed) lineups. "
+            "v2 (2026-04-27) dropped the (away OR platoon) requirement; "
+            "re-run historical_backtest --filter-e to refresh ROI baseline."
         ),
     )
     parser.add_argument(

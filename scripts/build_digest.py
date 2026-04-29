@@ -36,6 +36,11 @@ PREFERRED_COLS: list[tuple[str, list[str]]] = [
     ("price",         ["over_price"]),
     ("p_model",       ["p_model"]),
     ("edge",          ["edge"]),
+    # Sizing / emphasis layer (recent_form): 🔥 marks hot bats (>.300 over
+    # last 6 PA-counted games). stake column shows recommended units (2 for
+    # hot, 1 otherwise).
+    ("hot",           ["hot_streak"]),
+    ("stake",         ["recommended_units"]),
     ("platoon",       ["platoon_advantage"]),
     ("pitcher_known", ["pitcher_features_known"]),
     ("lineup",        ["lineup_confirmed"]),
@@ -73,6 +78,22 @@ def _format_value(display_col: str, val) -> str:
             return "yes" if int(val) == 1 else "no"
         except (TypeError, ValueError):
             return str(val)
+    if display_col == "hot":
+        # Surface the hot-streak flag as a flame so the email visually flags
+        # the high-conviction picks. Empty for cold bats keeps the column
+        # quiet on most rows.
+        try:
+            return "🔥" if int(val) == 1 else ""
+        except (TypeError, ValueError):
+            return ""
+    if display_col == "stake":
+        # recommended_units is a float (1.0 or 2.0). Render as "1u" / "2u"
+        # so the email reader knows the recommendation at a glance.
+        try:
+            u = float(val)
+            return f"{u:g}u"
+        except (TypeError, ValueError):
+            return ""
     if display_col == "lineup":
         # Boolean: True = MLB-confirmed, False = projected starter.
         try:

@@ -31,7 +31,11 @@ def load_model(name: str = DEFAULT_MODEL):
 
 def predict(df: pd.DataFrame, name: str = DEFAULT_MODEL) -> pd.Series:
     model, feats = load_model(name)
-    X, _ = prepare(df.assign(got_hit=0))
+    # Pass the model's saved feature list to prepare() so it knows which
+    # columns to keep — without this, prepare() defaults to the module-level
+    # FEATURES (v3) and strips any v4-specific columns out of df before
+    # X[feats] can find them.
+    X, _ = prepare(df.assign(got_hit=0), features=feats)
     X_feats = X[feats].copy()
     # XGBoost only accepts plain numpy dtypes. The rolling-features parquet
     # writes nullable Float64 (which pandas reports as "object" when it has

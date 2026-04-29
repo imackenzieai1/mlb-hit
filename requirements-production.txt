@@ -8,12 +8,11 @@
 # workflow's actions/setup-python@v5 with python-version: '3.11').
 # Explicitly exclude any CUDA wheels that downstream deps might try to pull.
 nvidia-nccl-cu12 ; python_version<"0"
-
 pandas==2.2.3
 numpy==1.26.4
 scipy==1.13.1
 scikit-learn==1.7.2
-xgboost-cpu==2.1.4
+xgboost-cpu==2.1.4   # CPU-only build of xgboost (drops 300 MB nvidia-nccl-cu12 dep — runner has no GPU)
 pybaseball==2.2.7
 MLB-StatsAPI==1.7.2
 requests==2.32.3

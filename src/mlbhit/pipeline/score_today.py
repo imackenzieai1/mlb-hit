@@ -13,6 +13,7 @@ from ..features.blended import (
 from ..features.park_weather import attach_park
 from ..features.pa import expected_pa
 from ..features.pitcher import build_pitcher_features
+from ..features.recent_form import attach_hot_streak, attach_opp_grind
 from ..io import clean_path, output_path
 from ..model.predict import predict
 from .fetch_lineups import fetch_lineups
@@ -273,6 +274,46 @@ def score_for_date(
     if "start_rate" not in df.columns:
         df["start_rate"] = pd.NA
 
+    # Attach recent-form sizing/emphasis signals from boxscores. These are
+    # NOT model features (the model wasn't retrained against them); they're
+    # downstream layers that drive `recommended_units` (2x stake on hot bats)
+    # and a `opp_grind` flag for slate-color visibility on the dashboard.
+    # Loading the same season's boxscores parquet that scoring already used
+    # for rolling features — same data source, no extra fetch needed.
+    box_path = clean_path(f"boxscores_{season}.parquet")
+    box_for_recent = None
+    if box_path.exists():
+        box_for_recent = pd.read_parquet(box_path)
+    if prior_season:
+        prior_path = clean_path(f"boxscores_{prior_season}.parquet")
+        if prior_path.exists():
+            prior_box = pd.read_parquet(prior_path)
+            box_for_recent = (prior_box if box_for_recent is None
+                              else pd.concat([prior_box, box_for_recent], ignore_index=True))
+    if box_for_recent is not None and not box_for_recent.empty:
+        targets = df[["player_id", "date"]].copy()
+        # attach_hot_streak needs player_id + date and returns the same rows
+        # in order; we then attach back to df by index alignment.
+        hot = attach_hot_streak(targets, box_for_recent)
+        for c in ["hot_streak_n_games", "hot_streak_h", "hot_streak_ab",
+                  "hot_streak_avg", "hot_streak", "recommended_units"]:
+            df[c] = hot[c].values
+        # attach_opp_grind also needs an `opp_team` alias for `opponent`.
+        targets_g = df[["opp_team" if "opp_team" in df.columns else "opponent",
+                         "date"]].copy()
+        targets_g.columns = ["opp_team", "date"]
+        grind = attach_opp_grind(targets_g, box_for_recent)
+        df["opp_consec_games"] = grind["opp_consec_games"].values
+        df["opp_grind"] = grind["opp_grind"].values
+    else:
+        # No boxscores on disk → safe defaults so the parquet schema stays
+        # stable and recommend.py / the dashboard never see KeyError.
+        df["hot_streak"] = 0
+        df["recommended_units"] = 1.0
+        df["opp_grind"] = 0
+        df["opp_consec_games"] = 0
+        df["hot_streak_avg"] = pd.NA
+
     cols_out = [
         "date",
         "game_pk",
@@ -292,6 +333,12 @@ def score_for_date(
         "pitcher_features_known",
         "pitcher_low_sample",
         "p_model",
+        # Recent-form columns (sizing/emphasis layers, not model features):
+        "hot_streak",
+        "hot_streak_avg",
+        "recommended_units",
+        "opp_grind",
+        "opp_consec_games",
     ]
     cols_out = [c for c in cols_out if c in df.columns]
     out = df[cols_out].sort_values("p_model", ascending=False)

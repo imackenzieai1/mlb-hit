@@ -130,14 +130,79 @@ def _roll_sum(daily: pd.DataFrame, window_days: int) -> pd.DataFrame:
     return rolled[keep]
 
 
+def _roll_sum_games(daily: pd.DataFrame, n_games: int) -> pd.DataFrame:
+    """Per-batter rolling SUM over the last `n_games` PA-counted days,
+    strictly prior to the current row.
+
+    Companion to `_roll_sum` but uses a GAME COUNT window instead of a CALENDAR
+    DAY window. Every row in `daily` is one PA-counted game (PA >= 1 by virtue
+    of having an aggregated PA count > 0), so a count-N rolling on the per-batter
+    series gives the last N actual at-bat opportunities — robust to off-days,
+    IL stints, and doubleheaders that the day-window can't differentiate.
+
+    Output columns mirror `_roll_sum` but with `_{n}g` suffix:
+        PA_{n}g, AB_{n}g, H_{n}g,
+        ba_{n}g, xba_{n}g, hard_hit_pct_{n}g, sweet_spot_pct_{n}g
+
+    Notes
+    -----
+    Implementation uses an explicit per-batter loop rather than
+    ``groupby().rolling()`` because pandas' chained groupby+rolling produces
+    a MultiIndex output that reorders rows by group key — re-attaching keys
+    by positional alignment (``d["batter"].values``) silently misaligns. The
+    loop is O(batters * games_per_batter) ≈ 5s/season at our scale, which is
+    fine for a once-per-season feature build.
+    """
+    d = daily.sort_values(["batter", "game_date"]).copy()
+
+    # Drop daily rows where the batter never came up (PA == 0). For game-count
+    # windowing those rows would dilute "his last N at-bat opportunities."
+    d = d[d["PA"].fillna(0) > 0].copy()
+
+    suffix = f"_{n_games}g"
+
+    chunks = []
+    for batter, g in d.groupby("batter", sort=False):
+        # rolling().sum() with default closed="right" includes the current row.
+        # shift(1) bumps each row's value to the NEXT row, so each row gets the
+        # sum of its prior n_games rows — equivalent to closed="left".
+        rolled = g[_DAILY_NUMERIC].rolling(window=n_games, min_periods=1).sum().shift(1)
+        rolled = rolled.rename(columns={c: f"{c}{suffix}" for c in _DAILY_NUMERIC})
+        rolled["batter"] = batter
+        rolled["game_date"] = g["game_date"].values
+        chunks.append(rolled)
+
+    if not chunks:
+        return pd.DataFrame(columns=["batter", "game_date"])
+    rolled = pd.concat(chunks, ignore_index=True)
+
+    rolled[f"ba{suffix}"] = rolled[f"H{suffix}"] / rolled[f"AB{suffix}"].replace(0, pd.NA)
+    rolled[f"xba{suffix}"] = rolled[f"xba_sum{suffix}"] / rolled[f"xba_cnt{suffix}"].replace(0, pd.NA)
+    rolled[f"hard_hit_pct{suffix}"] = rolled[f"hard_hit_cnt{suffix}"] / rolled[f"bb_total{suffix}"].replace(0, pd.NA)
+    rolled[f"sweet_spot_pct{suffix}"] = rolled[f"sweet_spot_cnt{suffix}"] / rolled[f"bb_total{suffix}"].replace(0, pd.NA)
+
+    keep = [
+        "batter", "game_date",
+        f"PA{suffix}", f"AB{suffix}", f"H{suffix}",
+        f"ba{suffix}", f"xba{suffix}",
+        f"hard_hit_pct{suffix}", f"sweet_spot_pct{suffix}",
+    ]
+    return rolled[keep]
+
+
 def build_batter_rolling(
     seasons: Iterable[int],
     windows: Iterable[int] = (14, 30),
+    game_windows: Iterable[int] = (3, 10),
 ) -> pd.DataFrame:
     """Produce per-(mlbam_id, game_date) rolling features across all given seasons.
 
-    Each season rolls independently (no off-season carryover). Writes to
-    data/clean/batter_rolling.parquet and returns the combined DataFrame.
+    Each season rolls independently (no off-season carryover). ``windows``
+    are calendar-day windows (compatible with the v3 set); ``game_windows``
+    are game-count windows added in v4 (last-N PA-counted games per batter).
+    Pass an empty tuple for either to disable that side.
+
+    Writes to data/clean/batter_rolling.parquet and returns the combined DataFrame.
     """
     per_season = []
     for season in seasons:
@@ -155,6 +220,12 @@ def build_batter_rolling(
         for w in windows:
             r = _roll_sum(daily, w)
             out = r if out is None else out.merge(r, on=["batter", "game_date"], how="outer")
+        for g in game_windows:
+            r = _roll_sum_games(daily, g)
+            out = r if out is None else out.merge(r, on=["batter", "game_date"], how="outer")
+        if out is None:
+            print(f"[{season}] no windows requested — skipping season")
+            continue
         out["season"] = season
         per_season.append(out)
 
@@ -181,8 +252,14 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--windows", nargs="+", type=int, default=[14, 30],
-        help="Rolling window sizes in days.",
+        help="Rolling window sizes in calendar days.",
+    )
+    parser.add_argument(
+        "--game-windows", nargs="+", type=int, default=[3, 10],
+        help="Rolling window sizes in PA-counted games (v4 features).",
     )
     args = parser.parse_args()
-    df = build_batter_rolling(args.seasons, windows=args.windows)
+    df = build_batter_rolling(
+        args.seasons, windows=args.windows, game_windows=args.game_windows,
+    )
     print(df.head(15).to_string())

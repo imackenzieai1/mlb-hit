@@ -24,12 +24,29 @@ models/*.joblib
 data/modeling/*
 !data/modeling/player_game_features.parquet
 
-# Cleaned season-stats parquets (small, slow to regenerate, used by score_today)
+# Cleaned data parquets that score_today.py reads at runtime. These are
+# small (10 MB total) and slow to regenerate, so we ship them with the repo
+# and let the workflow update boxscores_* + game_starters_* in place daily.
+# Anything under data/clean/ NOT listed here stays gitignored (e.g. the
+# `daily_boxscores/` and `game_starters_cache/` working-cache dirs, the
+# `player_name_lookup_cache.parquet` resolver cache).
 !data/clean/
 data/clean/*
-!data/clean/season_stats_*.parquet
+data/clean/daily_boxscores/
+data/clean/game_starters_cache/
 !data/clean/stadiums.csv
 !data/clean/boxscores_*.parquet
+!data/clean/batter_season_stats.parquet
+!data/clean/pitcher_season_stats.parquet
+!data/clean/batter_rolling.parquet
+!data/clean/pitcher_rolling.parquet
+!data/clean/game_starters_*.parquet
+!data/clean/players.parquet
+!data/clean/bullpen_features.parquet
+# Legacy: this matched nothing in the current schema (files are named
+# `batter_season_stats.parquet`, not `season_stats_batter.parquet`) but
+# kept here in case anything ever lands at the canonical name.
+!data/clean/season_stats_*.parquet
 
 # Recommendations directory: the workflow commits today's CSV back here
 # so the dashboard + email digest can read it.

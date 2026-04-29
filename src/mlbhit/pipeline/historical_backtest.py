@@ -25,7 +25,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ..io import modeling_path, raw_path
+from ..io import clean_path, modeling_path, raw_path
+from ..features.recent_form import attach_hot_streak, attach_opp_grind
 from ..model.predict import predict
 from ..utils.odds_math import american_to_decimal, ev_per_unit
 from .fetch_historical_odds import _date_path as historical_odds_path
@@ -100,9 +101,15 @@ def _score_historical_features(dates: list[str], model_name: str | None = None) 
         "date", "player_id", "p_model", "got_hit",
         "home_away", "batter_hand", "pitcher_hand",
         "platoon_advantage", "pitcher_features_known",
+        # Carrying `opponent` through so backtest can compute opp-grind
+        # streaks (recent_form.attach_opp_grind needs opp_team + date).
+        "opponent",
     ]
     keep = [c for c in keep if c in feat.columns]
-    return feat[keep].drop_duplicates(subset=["date", "player_id"], keep="first")
+    out = feat[keep].drop_duplicates(subset=["date", "player_id"], keep="first")
+    if "opponent" in out.columns:
+        out = out.rename(columns={"opponent": "opp_team"})
+    return out
 
 
 def backtest(
@@ -118,12 +125,12 @@ def backtest(
 ) -> pd.DataFrame:
     """Score historical odds + features and report ROI.
 
-    `filter_e=True` applies the validated Filter E gate identically to the
-    one in recommend.py: edge >= 15% AND price >= -200 AND
-    (home_away == 'A' OR platoon_advantage == 1). When enabled, this also
+    `filter_e=True` applies the Filter E v2 gate identically to the one in
+    recommend.py: edge >= 15% AND price >= -200. When enabled, this also
     overrides `edge_min` to 0.15 internally so the threshold matches the
-    v1 Filter E baseline (raised from 0.08 to 0.15 — the high-edge tail
+    Filter E baseline (raised from 0.08 to 0.15 — the high-edge tail
     delivered better ROI than the looser gate; this is the target).
+    v2 (2026-04-27) dropped the (away OR platoon) requirement that v1 had.
 
     NOTE: the `start_rate` projected-lineup gate from recommend.py has no
     effect here — backtest data is built from boxscores, so every row IS
@@ -182,7 +189,10 @@ def backtest(
     )
 
     if filter_e:
-        # Price ceiling on chalk: skip anything more negative than -200.
+        # Filter E v2 (2026-04-27): edge >= 15% (already in base_mask) and
+        # price >= -200 (chalk ceiling). v1 also required (away OR platoon);
+        # that gate was dropped to widen the slate. Away/platoon counts are
+        # still printed below for slate-composition visibility.
         try:
             price_int = one_per_player["over_price"].astype("Int64")
             price_mask = price_int >= price_max_negative
@@ -190,17 +200,7 @@ def backtest(
             price_mask = one_per_player["over_price"].apply(
                 lambda px: pd.notna(px) and int(px) >= price_max_negative
             )
-        # Score-side gate: away OR platoon advantage.
-        if "home_away" in one_per_player.columns:
-            away_mask = one_per_player["home_away"].astype(str) == "A"
-        else:
-            away_mask = pd.Series(False, index=one_per_player.index)
-        if "platoon_advantage" in one_per_player.columns:
-            plat_mask = one_per_player["platoon_advantage"].fillna(0).astype(int) == 1
-        else:
-            plat_mask = pd.Series(False, index=one_per_player.index)
-        filter_e_mask = price_mask & (away_mask | plat_mask)
-        bets_mask = base_mask & filter_e_mask
+        bets_mask = base_mask & price_mask
     else:
         bets_mask = base_mask
 
@@ -216,6 +216,33 @@ def backtest(
         -stake,
     )
 
+    # Attach recent-form sizing/emphasis signals from boxscores. These DON'T
+    # affect bet selection (already done) — they label each bet so we can
+    # report unit-weighted P&L (hot_streak → 2x stake) and cohort breakdowns
+    # (opp_grind → 11+ consecutive games for the opp). Loads boxscore parquets
+    # for every season touched by the backtest window.
+    seasons = sorted({pd.to_datetime(d).year for d in bets["date"]})
+    box_frames = []
+    for yr in seasons:
+        p = clean_path(f"boxscores_{yr}.parquet")
+        if p.exists():
+            box_frames.append(pd.read_parquet(p))
+    if box_frames:
+        boxscores_all = pd.concat(box_frames, ignore_index=True)
+        bets = attach_hot_streak(bets, boxscores_all)
+        if "opp_team" in bets.columns:
+            bets = attach_opp_grind(bets, boxscores_all)
+    else:
+        # No boxscores on disk → can't compute signals; backfill safe defaults
+        # so downstream weighted-P&L math still works (multiplier becomes 1.0).
+        bets["hot_streak"] = 0
+        bets["recommended_units"] = 1.0
+        bets["opp_grind"] = 0
+        bets["opp_consec_games"] = 0
+
+    bets["pnl_weighted"] = bets["pnl"] * bets["recommended_units"]
+    total_units_staked = (stake * bets["recommended_units"]).sum()
+
     n = len(bets)
     hit_rate = bets["got_hit"].astype(int).mean()
     roi = bets["pnl"].sum() / (stake * n)
@@ -229,7 +256,7 @@ def backtest(
     print("=" * 60)
     print(f"  model             {model_name or 'default'}")
     if filter_e:
-        print(f"  filter            edge>={edge_min:.0%} & price>={price_max_negative} & (away OR platoon)")
+        print(f"  filter            edge>={edge_min:.0%} & price>={price_max_negative}  (Filter E v2)")
     else:
         print(f"  edge threshold    {edge_min:.0%}")
     print(f"  require_pitcher   {require_pitcher}")
@@ -249,6 +276,62 @@ def backtest(
         print(f"  away bets         {away_n}  ({away_n / n:.1%})")
         print(f"  platoon bets      {plat_n}  ({plat_n / n:.1%})")
         print(f"  away+platoon      {both_n}  ({both_n / n:.1%})")
+
+    # Cohort breakdown: hot bats, opp-grind, and combos. Each cohort prints
+    # its own bet count, hit rate, ROI per bet (flat $1 stake) so we can
+    # see whether the signals are independently positive before treating
+    # them as sizing levers.
+    def _cohort(name: str, mask: pd.Series) -> None:
+        m = mask & bets["got_hit"].notna()
+        sub = bets[m]
+        if len(sub) == 0:
+            print(f"  {name:18s} 0 bets (skipped)")
+            return
+        sub_pnl = sub["pnl"].sum()
+        sub_roi = sub_pnl / (stake * len(sub))
+        sub_hr = sub["got_hit"].astype(int).mean()
+        print(f"  {name:18s} {len(sub):>4d} bets  hit {sub_hr:.1%}  P&L ${sub_pnl:+7.2f}  ROI {sub_roi:+.1%}")
+
+    print()
+    print(f"COHORT BREAKDOWN  (flat $1 stake, all cohorts)")
+    if "hot_streak" in bets.columns:
+        _cohort("hot bats (>.300/6g)", bets["hot_streak"] == 1)
+        _cohort("cold bats",            bets["hot_streak"] == 0)
+    if "opp_grind" in bets.columns:
+        _cohort("opp grind (11+ G)",    bets["opp_grind"] == 1)
+        _cohort("opp rested (<=10 G)",  bets["opp_grind"] == 0)
+    if {"hot_streak","opp_grind"}.issubset(bets.columns):
+        _cohort("hot + grind combo",   (bets["hot_streak"] == 1) & (bets["opp_grind"] == 1))
+
+    # Price-tier breakdown — answers "where does chalk earn vs lose?". The
+    # singles-only structure on chalk is brutal (lose 1u, win <0.40u), so a
+    # cohort that's only marginally +EV at -250 is much riskier than the
+    # same +EV at -130. If you're loosening --price-min beyond -200, this
+    # is the table to read.
+    _price = bets["over_price"].astype("Int64")
+    print()
+    print(f"PRICE-TIER BREAKDOWN  (flat $1 stake, all in this run's bet pool)")
+    _cohort("+odds (underdog)",   _price > 0)
+    _cohort("-100 to -150",       (_price <= -100) & (_price >= -150))
+    _cohort("-151 to -200",       (_price <= -151) & (_price >= -200))
+    _cohort("-201 to -250",       (_price <= -201) & (_price >= -250))
+    _cohort("-251 to -300",       (_price <= -251) & (_price >= -300))
+    _cohort("worse than -300",    _price <= -301)
+
+    # Unit-weighted summary (hot_streak triggers 2x stake by default — see
+    # recent_form.attach_hot_streak for the multiplier). This is the headline
+    # number to compare against the flat-stake ROI above when deciding whether
+    # to actually bet more on hot bats live.
+    if "pnl_weighted" in bets.columns and total_units_staked > 0:
+        weighted_pnl = bets["pnl_weighted"].sum()
+        weighted_roi = weighted_pnl / total_units_staked
+        units_n_2x = int((bets["recommended_units"] >= 2.0 - 1e-9).sum())
+        print()
+        print(f"UNIT-WEIGHTED SIZING  (2x stake on hot bats, 1x otherwise)")
+        print(f"  bets at 2x stake  {units_n_2x:>4d}  ({units_n_2x / n:.1%})")
+        print(f"  total units staked  {total_units_staked:.1f}u")
+        print(f"  total P&L           ${weighted_pnl:+.2f}")
+        print(f"  ROI per unit        {weighted_roi:+.1%}")
 
     # Per-day breakdown
     by_day = bets.groupby("date").agg(
@@ -276,8 +359,9 @@ if __name__ == "__main__":
         "--filter-e",
         action="store_true",
         help=(
-            "Apply Filter E: edge>=15%% & price>=-200 & (away OR platoon advantage). "
-            "Identical gate to recommend.py --filter-e."
+            "Apply Filter E v2: edge>=15%% & price>=-200. Identical gate to "
+            "recommend.py --filter-e (the 2026-04-27 change dropped the "
+            "(away OR platoon) clause that v1 required)."
         ),
     )
     parser.add_argument(
@@ -287,6 +371,17 @@ if __name__ == "__main__":
             "Drop rows where pitcher_hand is unknown (matches recommend.py's "
             "--require-pitcher; the validated backtest had pitcher features "
             "present, so this is the apples-to-apples comparison)."
+        ),
+    )
+    parser.add_argument(
+        "--price-min",
+        type=int,
+        default=-200,
+        help=(
+            "Lowest American price allowed when --filter-e is set (default -200). "
+            "Use a more-negative number to admit chalkier picks: e.g. --price-min -250 "
+            "lets in -201..-250, --price-min -1000 effectively removes the cap. "
+            "The price-tier cohort breakdown in the output shows where chalk earns/loses."
         ),
     )
     args = parser.parse_args()
@@ -299,4 +394,5 @@ if __name__ == "__main__":
         model_name=args.model,
         filter_e=args.filter_e,
         require_pitcher=args.require_pitcher,
+        price_max_negative=args.price_min,
     )

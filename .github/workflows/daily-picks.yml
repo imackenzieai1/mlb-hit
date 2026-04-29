@@ -68,11 +68,24 @@ jobs:
           pip install -e .
 
       - name: Verify model + features are present
+        # Fail at step 1 if any score_today input is missing — better than
+        # waiting until score_today blows up 90 seconds later.
         run: |
-          test -f models/xgb_v3.joblib || { echo "::error::missing models/xgb_v3.joblib"; exit 1; }
-          test -f models/xgb_v3_recal.joblib || { echo "::error::missing models/xgb_v3_recal.joblib (the calibrated default)"; exit 1; }
-          test -f data/modeling/player_game_features.parquet || \
-            { echo "::error::missing data/modeling/player_game_features.parquet"; exit 1; }
+          for f in \
+            models/xgb_v3.joblib \
+            models/xgb_v3_recal.joblib \
+            data/modeling/player_game_features.parquet \
+            data/clean/batter_season_stats.parquet \
+            data/clean/pitcher_season_stats.parquet \
+            data/clean/batter_rolling.parquet \
+            data/clean/pitcher_rolling.parquet \
+            data/clean/players.parquet \
+            data/clean/bullpen_features.parquet \
+            data/clean/stadiums.csv \
+            data/clean/boxscores_2026.parquet \
+            data/clean/game_starters_2026.parquet ; do
+            test -f "$f" || { echo "::error::missing $f"; exit 1; }
+          done
 
       - name: Fetch today's schedule
         run: python -m mlbhit.pipeline.fetch_schedule --date ${{ steps.target.outputs.date }}
