@@ -203,6 +203,17 @@
       text-decoration: none;
     }
     a.refresh:hover { color: var(--text); }
+    /* Footer legend explaining the 🔥 and ⚙️ flags. Stacked rows so the
+       emoji sits flush left and the text wraps cleanly on narrow viewports. */
+    .legend {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .legend-row { display: block; }
     /* Refresh-picks button: deep-links to the workflow's "Run workflow"
        page on github.com. From there it's two taps to trigger a re-run.
        Static pages can't dispatch GitHub Actions directly without putting
@@ -280,7 +291,11 @@
       <summary id="droppedSummary">Dropped picks (0)</summary>
       <div id="droppedRows"></div>
     </details>
-    <p class="meta" style="margin-top:24px">
+    <p class="meta legend" style="margin-top:24px">
+      <span class="legend-row"><span class="hot-flag">🔥</span> Hot bat — BA &gt; .300 over last 6 PA-counted games (2u sizing).</span>
+      <span class="legend-row"><span class="hot-flag">⚙️</span> Opponent grind — opp has played 11+ consecutive calendar-day games (bullpen fatigue signal).</span>
+    </p>
+    <p class="meta" style="margin-top:8px">
       <a class="refresh" href="javascript:location.reload()">↻ reload page</a>
     </p>
   </div>
