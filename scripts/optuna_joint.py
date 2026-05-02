@@ -98,7 +98,9 @@ HOT_STREAK_UNITS = 2.0
 SHARPE_EPS = 1e-6
 
 # Books we accept odds from. Matches the production recommend.py preference.
-BOOK_PREFERENCE = ("draftkings", "fanduel")
+# Order matters: when the same player has lines from multiple books, the first
+# book wins (see book_rank dedupe below). Switched to FD-first 2026-05-02.
+BOOK_PREFERENCE = ("fanduel", "draftkings")
 
 
 # ---------------------------------------------------------------------------

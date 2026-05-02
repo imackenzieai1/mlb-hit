@@ -65,3 +65,9 @@ data/output/*
 !data/output/recommendations/*.csv
 !data/output/backtests/
 !data/output/backtests/*.csv
+# Dropped-picks directory: when a re-run during the day removes a pick that
+# was in the morning's CSV (edge fell, lineup changed, price moved, etc.),
+# the row is preserved here with a drop_reason column. The dashboard surfaces
+# these in a collapsible section per date.
+!data/output/dropped/
+!data/output/dropped/*.csv

@@ -7,13 +7,15 @@ Writes docs/manifest.json with shape:
     {
         "generated_at": "2026-04-25T11:03:14Z",
         "latest": "2026-04-25",
-        "dates": ["2026-04-25", "2026-04-24", ...]   // newest first
+        "dates": ["2026-04-25", "2026-04-24", ...],          // newest first
+        "dropped_dates": ["2026-04-25", "2026-04-23", ...]   // dates with a dropped CSV
     }
 
-Also MIRRORS each {date}_filter_e.csv into docs/recommendations/. The
-canonical home stays under data/output/recommendations/ (backtests, dashboards,
-ad-hoc scripts all read from there), but GitHub Pages serves only the /docs
-folder, so the mirror is what the live dashboard actually fetches.
+Also MIRRORS each {date}_filter_e.csv into docs/recommendations/ AND each
+{date}.csv from data/output/dropped/ into docs/dropped/. The canonical home
+stays under data/output/ (backtests, dashboards, ad-hoc scripts all read from
+there), but GitHub Pages serves only the /docs folder, so the mirror is what
+the live dashboard actually fetches.
 """
 from __future__ import annotations
 
@@ -25,15 +27,19 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RECS_DIR = REPO_ROOT / "data" / "output" / "recommendations"
+DROPPED_DIR = REPO_ROOT / "data" / "output" / "dropped"
 DOCS_DIR = REPO_ROOT / "docs"
 DOCS_RECS_DIR = DOCS_DIR / "recommendations"
+DOCS_DROPPED_DIR = DOCS_DIR / "dropped"
 
 DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_filter_e\.csv$")
+DROPPED_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.csv$")
 
 
 def main() -> None:
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
     DOCS_RECS_DIR.mkdir(parents=True, exist_ok=True)
+    DOCS_DROPPED_DIR.mkdir(parents=True, exist_ok=True)
 
     dates: list[str] = []
     if RECS_DIR.exists():
@@ -46,16 +52,31 @@ def main() -> None:
                 # the file content hasn't changed across runs.
                 shutil.copy2(p, DOCS_RECS_DIR / p.name)
     dates = sorted(set(dates), reverse=True)
+
+    # Dropped picks: written by recommend.py when a re-run removes a pick
+    # that was in the prior CSV. Mirror these to docs/dropped/ for the
+    # collapsible "Dropped picks" section on the dashboard.
+    dropped_dates: list[str] = []
+    if DROPPED_DIR.exists():
+        for p in DROPPED_DIR.iterdir():
+            m = DROPPED_DATE_RE.match(p.name)
+            if m:
+                dropped_dates.append(m.group(1))
+                shutil.copy2(p, DOCS_DROPPED_DIR / p.name)
+    dropped_dates = sorted(set(dropped_dates), reverse=True)
+
     manifest = {
         "generated_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "latest": dates[0] if dates else None,
         "dates": dates,
+        "dropped_dates": dropped_dates,
     }
     out = DOCS_DIR / "manifest.json"
     out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(
         f"  wrote {out} ({len(dates)} date(s); latest={manifest['latest']}); "
-        f"mirrored {len(dates)} CSV(s) into {DOCS_RECS_DIR}"
+        f"mirrored {len(dates)} pick CSV(s) into {DOCS_RECS_DIR}, "
+        f"{len(dropped_dates)} dropped CSV(s) into {DOCS_DROPPED_DIR}."
     )
 
 

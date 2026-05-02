@@ -219,6 +219,48 @@
       margin-bottom: 12px;
     }
     a.run-button:hover { opacity: 0.9; }
+    /* Dropped-picks section: collapsible block underneath the main rows.
+       Shown only when a dropped CSV exists for the selected date.
+       Lets the user inspect "what would have been picked at the morning run
+       but isn't anymore" without polluting the main slate. */
+    details.dropped {
+      margin-top: 24px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 4px 12px;
+    }
+    details.dropped summary {
+      padding: 8px 0;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--muted);
+      list-style: none;
+    }
+    details.dropped summary::-webkit-details-marker { display: none; }
+    details.dropped summary::before {
+      content: "▸ ";
+      display: inline-block;
+      transition: transform 0.15s;
+    }
+    details.dropped[open] summary::before { content: "▾ "; }
+    details.dropped .dropped-row {
+      background: var(--row);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin: 8px 0;
+      opacity: 0.85;
+    }
+    details.dropped .dropped-row:nth-child(even) { background: var(--row-alt); }
+    details.dropped .reason {
+      color: var(--muted);
+      font-size: 12px;
+      font-style: italic;
+      margin-top: 4px;
+      display: block;
+    }
   </style>
 </head>
 <body>
@@ -234,6 +276,10 @@
        rel="noopener">⚡ Refresh picks (run workflow)</a>
     <div class="summary" id="summary" hidden></div>
     <div id="rows"></div>
+    <details class="dropped" id="droppedBlock" hidden>
+      <summary id="droppedSummary">Dropped picks (0)</summary>
+      <div id="droppedRows"></div>
+    </details>
     <p class="meta" style="margin-top:24px">
       <a class="refresh" href="javascript:location.reload()">↻ reload page</a>
     </p>
@@ -246,6 +292,12 @@
     // CSVs are mirrored from data/output/recommendations/ into docs/recommendations/
     // by build_dashboard_manifest.py, because GitHub Pages serves only /docs.
     const csvUrlForDate = (d) => `recommendations/${d}_filter_e.csv`;
+    // Dropped-picks CSVs (mirrored from data/output/dropped/). Filename convention
+    // is just {date}.csv — no _filter_e suffix because every dropped pick by
+    // definition came from the production filter_e file.
+    const droppedCsvUrlForDate = (d) => `dropped/${d}.csv`;
+    // Dates that have a dropped CSV — populated from the manifest in init().
+    let DROPPED_DATES = new Set();
 
     function fmtPct(x) {
       const v = parseFloat(x);
@@ -431,6 +483,70 @@
         `;
       }).join("");
     }
+    function renderDropped(date, rows) {
+      const block = document.getElementById("droppedBlock");
+      const summary = document.getElementById("droppedSummary");
+      const rowsEl = document.getElementById("droppedRows");
+      if (!rows.length) {
+        block.hidden = true;
+        rowsEl.innerHTML = "";
+        return;
+      }
+      block.hidden = false;
+      summary.textContent = `Dropped picks (${rows.length})`;
+      // Sort: most recently dropped first, falling back to game time.
+      rows.sort((a, b) => {
+        const aD = a.dropped_at || "";
+        const bD = b.dropped_at || "";
+        return aD < bD ? 1 : aD > bD ? -1 : 0;
+      });
+      rowsEl.innerHTML = rows.map((r) => {
+        const name = pick(r, ["player_name", "player_name_x", "player_name_y", "name"]);
+        const team = pick(r, ["team", "batter_team"]);
+        const opp  = pick(r, ["opp_team", "opponent"]);
+        const ha   = pick(r, ["home_away"]);
+        const haSym = ha === "A" ? "@" : ha === "H" ? "vs" : "·";
+        const reason = r.drop_reason || "(no reason recorded)";
+        const firstPitch = pick(r, ["first_pitch_et"]);
+        const pitchHtml = firstPitch
+          ? `<span class="pitch-time" title="First pitch (Eastern Time)">${firstPitch}</span>`
+          : "";
+        const edgeStr = r.edge ? fmtPct(r.edge) : "";
+        const priceStr = r.over_price ? fmtPrice(r.over_price) : "";
+        return `
+          <div class="dropped-row">
+            <div class="row-top">
+              <span class="name">${name || "—"}</span>
+              <span class="price">${priceStr}</span>
+            </div>
+            <div class="row-bot">
+              <span>${team} ${haSym} ${opp}${pitchHtml}</span>
+              <span>${edgeStr ? edgeStr + " edge (when picked)" : ""}</span>
+            </div>
+            <span class="reason">${reason}</span>
+          </div>
+        `;
+      }).join("");
+    }
+    async function loadDropped(date) {
+      // Only fetch if the manifest told us this date has a dropped file.
+      // Avoids 404 spam on dates with no drops (the common case).
+      if (!DROPPED_DATES.has(date)) {
+        renderDropped(date, []);
+        return;
+      }
+      try {
+        const r = await fetch(droppedCsvUrlForDate(date), { cache: "no-cache" });
+        if (!r.ok) {
+          renderDropped(date, []);
+          return;
+        }
+        const { rows } = parseCSV(await r.text());
+        renderDropped(date, rows);
+      } catch (e) {
+        renderDropped(date, []);
+      }
+    }
     async function loadDate(date) {
       const url = csvUrlForDate(date);
       try {
@@ -442,6 +558,8 @@
         document.getElementById("meta").textContent = `couldn't load ${date}: ${e.message}`;
         document.getElementById("rows").innerHTML = "";
       }
+      // Always try to load dropped picks (will no-op if none exist for date).
+      loadDropped(date);
     }
     async function init() {
       let manifest;
@@ -453,6 +571,9 @@
           "no manifest found — has the workflow run yet?";
         return;
       }
+      // Capture the set of dates that have a dropped CSV so loadDropped
+      // can avoid 404'ing on dates with no drops (the common case).
+      DROPPED_DATES = new Set(manifest.dropped_dates || []);
       const sel = document.getElementById("datePicker");
       (manifest.dates || []).forEach((d) => {
         const o = document.createElement("option");

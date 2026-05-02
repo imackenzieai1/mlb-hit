@@ -65,6 +65,12 @@ POSTPONED_STATUSES = {"Postponed"}
 FILTER_E_EDGE_MIN = 0.11445569939746027
 FILTER_E_PRICE_MIN = -240
 
+# Book preference for line dedupe. When the same player has prop odds from
+# multiple books in the prop_prices parquet, the first book listed wins.
+# Switched to FD-first 2026-05-02 (was DK-first since the project's start).
+# historical_backtest.py and scripts/optuna_joint.py mirror this ordering.
+BOOK_PREFERENCE: tuple[str, ...] = ("fanduel", "draftkings")
+
 # Minimum recent start frequency for a projected (un-confirmed) lineup row to
 # clear Filter E. 0.80 = "started 80%+ of the team's last 14 games" — i.e.
 # essentially a regular. 0.50 was the projection threshold (see
@@ -230,6 +236,151 @@ def _pregame_game_pks(target_date: date) -> set[int] | None:
     return set(pd.to_numeric(sched["game_pk"], errors="coerce").dropna().astype(int).tolist())
 
 
+def _locked_game_pks(target_date: date) -> set[int]:
+    """Return game_pks whose game has already started or finished as of now.
+
+    Inverse of _pregame_game_pks: any game in IN_PROGRESS_STATUSES (covers
+    Final/In Progress/Suspended/Delayed mid-game) OR with a first-pitch
+    timestamp <= now. Used by the merge-with-existing-CSV logic to know
+    which morning picks must NOT be wiped on an afternoon re-run — once a
+    game is locked, the bet is already placed and the row needs to survive
+    so day-grading and dashboard P&L still see it.
+
+    Returns an empty set on any read error — the caller treats that as "no
+    locks", which is the safe default (a fresh re-run with no existing CSV
+    just writes the new picks).
+    """
+    sched_path = raw_path("schedule", f"{target_date.isoformat()}.parquet")
+    if not sched_path.exists():
+        return set()
+    try:
+        sched = pd.read_parquet(sched_path)
+    except Exception:
+        return set()
+    if "game_pk" not in sched.columns:
+        return set()
+
+    locked: set[int] = set()
+
+    if "status" in sched.columns:
+        bad = sched[sched["status"].isin(IN_PROGRESS_STATUSES)]
+        locked |= set(
+            pd.to_numeric(bad["game_pk"], errors="coerce").dropna().astype(int).tolist()
+        )
+
+    if "game_datetime" in sched.columns:
+        try:
+            gdt = pd.to_datetime(sched["game_datetime"], utc=True, errors="coerce")
+            now_utc = datetime.now(tz=timezone.utc)
+            started = sched[gdt.notna() & (gdt <= now_utc)]
+            locked |= set(
+                pd.to_numeric(started["game_pk"], errors="coerce")
+                .dropna().astype(int).tolist()
+            )
+        except Exception:
+            pass
+
+    return locked
+
+
+def _compute_drop_rationale(
+    prev_row: pd.Series,
+    full_pool: pd.DataFrame,
+    edge_floor: float,
+    price_floor: int,
+) -> str:
+    """Produce a one-sentence reason a previously-picked row is no longer in
+    the latest filter pass.
+
+    `full_pool` is the CURRENT-RUN merged (predictions + odds) DataFrame
+    BEFORE any Filter E gating — the pool we'd be filtering down. We look
+    up the same (game_pk, player_id) in there and figure out what changed.
+
+    Order of checks is "most diagnostic first" so the most informative
+    reason wins when multiple changes happened at once (e.g., edge fell
+    AND lineup unconfirmed → we report the edge change, since it's the
+    binary gate decision).
+    """
+    pid = prev_row.get("player_id")
+    gpk = prev_row.get("game_pk")
+    if pd.isna(pid) or pd.isna(gpk):
+        return "Could not identify pick in latest run (missing player_id/game_pk)."
+
+    if full_pool.empty:
+        return "Player no longer in scoring pool — likely lineup changed or no prop odds available."
+
+    cur = full_pool[
+        (full_pool["game_pk"] == int(gpk))
+        & (full_pool["player_id"] == int(pid))
+    ]
+    if cur.empty:
+        return ("Player no longer in projected/confirmed lineup or no longer "
+                "has prop odds in the latest fetch.")
+
+    cur = cur.iloc[0]
+    cur_edge = cur.get("edge")
+    cur_price = cur.get("over_price")
+
+    # Edge fell below floor — the most common cause of a drop.
+    try:
+        if pd.notna(cur_edge):
+            cur_edge_f = float(cur_edge)
+            if cur_edge_f < edge_floor:
+                prev_edge = prev_row.get("edge")
+                if pd.notna(prev_edge):
+                    return (f"Edge dropped from {float(prev_edge):.1%} to {cur_edge_f:.1%}, "
+                            f"below {edge_floor:.1%} gate floor.")
+                return f"Edge fell to {cur_edge_f:.1%}, below {edge_floor:.1%} gate floor."
+    except Exception:
+        pass
+
+    # Price moved below floor (more negative than allowed).
+    try:
+        if pd.notna(cur_price):
+            cur_price_i = int(cur_price)
+            if cur_price_i < price_floor:
+                prev_price = prev_row.get("over_price")
+                if pd.notna(prev_price):
+                    return (f"Price moved from {int(prev_price):+d} to {cur_price_i:+d}, "
+                            f"below {price_floor} floor.")
+                return f"Price moved to {cur_price_i:+d}, below {price_floor} floor."
+    except Exception:
+        pass
+
+    # Pitcher feature flipped to unknown.
+    cur_pf = cur.get("pitcher_features_known")
+    if pd.notna(cur_pf):
+        try:
+            if int(cur_pf) == 0:
+                return ("Probable pitcher no longer announced; pitcher features "
+                        "fell back to league means (model output unreliable).")
+        except Exception:
+            pass
+
+    # Lineup status flipped from confirmed to unconfirmed.
+    cur_lc = cur.get("lineup_confirmed")
+    prev_lc = prev_row.get("lineup_confirmed")
+    try:
+        if pd.notna(cur_lc) and not bool(cur_lc) and bool(prev_lc):
+            return "Lineup unconfirmed in latest run; projected role uncertain."
+    except Exception:
+        pass
+
+    # Projected start_rate fell below the gate.
+    cur_sr = cur.get("start_rate")
+    if pd.notna(cur_sr) and pd.notna(cur_lc):
+        try:
+            if not bool(cur_lc):
+                sr = float(cur_sr)
+                if sr < FILTER_E_PROJECTED_MIN_START_RATE:
+                    return (f"Projected lineup start_rate {sr:.0%}, below "
+                            f"{FILTER_E_PROJECTED_MIN_START_RATE:.0%} gate.")
+        except Exception:
+            pass
+
+    return "No longer passing Filter E gate; specific cause not determinable from feature diff."
+
+
 def recommend(
     predictions: pd.DataFrame,
     prop_prices: pd.DataFrame | None = None,
@@ -307,6 +458,22 @@ def recommend(
         return preds.head(25)
 
     m = preds.merge(prop_prices, on=["date", "player_id"], how="inner")
+
+    # When prop_prices has lines from multiple books for the same player, dedupe
+    # to one row per (date, player_id) using BOOK_PREFERENCE order — FD wins
+    # over DK by default, with both treated as fallback for any other book.
+    # Without this step the merge produces 1-row-per-(player, book), which
+    # would inflate the bet count and double-count the same player's hit.
+    if "book" in m.columns and not m.empty:
+        m["book_rank"] = m["book"].map(
+            {b: i for i, b in enumerate(BOOK_PREFERENCE)}
+        ).fillna(99)
+        m = (
+            m.sort_values(["date", "player_id", "book_rank"])
+             .drop_duplicates(subset=["date", "player_id"], keep="first")
+             .drop(columns=["book_rank"])
+        )
+
     m["edge"] = m.apply(lambda r: ev_per_unit(r["p_model"], int(r["over_price"])), axis=1)
     m["filter_e_pass"] = m.apply(
         lambda r: _passes_filter_e(r, edge_floor=edge_floor, price_floor=price_floor),
@@ -598,14 +765,11 @@ if __name__ == "__main__":
         label = "FILTER E"
     else:
         label = f"edge>={EDGE_MIN:.0%}"
-    n_bets = len(recs)
-    n_print = n_bets if args.top in (0, None) else min(args.top, n_bets)
-    print(f"\n{'=' * 60}\nRECOMMENDATIONS  {d}  ({label})\n{'=' * 60}")
-    print(f"  {n_bets} bets cleared the filter "
-          f"({'all' if n_print == n_bets else f'top {n_print}'} shown below; "
-          f"full list in CSV).")
-    if n_bets:
-        print(recs.head(n_print).to_string(index=False))
+
+    # How many came directly from this run's filter pass — kept around so the
+    # post-merge summary can show "N new + M carried forward = total".
+    n_new = len(recs)
+
     # Use a distinct suffix when gate overrides are in effect — otherwise the
     # experimental run would clobber the production _filter_e.csv on disk
     # (which feeds grade_picks.py + the dashboard).
@@ -617,4 +781,188 @@ if __name__ == "__main__":
         suffix = "_filter_e"
     else:
         suffix = ""
-    recs.to_csv(output_path("recommendations", f"{d}{suffix}.csv"), index=False)
+
+    out_csv = output_path("recommendations", f"{d}{suffix}.csv")
+
+    # ----------------------------------------------------------------------
+    # Merge with existing picks file (production runs only).
+    # ----------------------------------------------------------------------
+    # When the user re-runs the workflow during the day (e.g. 8 AM full slate
+    # → 5:45 PM late slate refresh), we want to:
+    #   1. PRESERVE picks for games that have already started/finished — those
+    #      bets are committed and need to stay so the dashboard P&L works the
+    #      next morning.
+    #   2. REPLACE picks for still-pre-game games with the latest run's view
+    #      (latest odds, lineup status, edge).
+    #   3. RECORD the picks that were dropped (in old file, not in new run,
+    #      game still pre-game) along with a one-sentence reason, so we can
+    #      still see what would have been picked and why it changed.
+    #
+    # Only applies to the production CSV (suffix == "_filter_e"). Ad-hoc
+    # tuning runs with --edge-floor/--price-floor write to suffixed files
+    # and don't touch the canonical picks history.
+    do_merge = (
+        args.filter_e
+        and args.edge_floor is None
+        and args.price_floor is None
+        and prices is not None
+        and not prices.empty
+    )
+
+    if do_merge:
+        # Build the unfiltered merged pool (preds + prices) so _compute_drop_
+        # rationale can look up the CURRENT edge/price/lineup state for any
+        # row we're about to drop.
+        preds_n = preds.copy()
+        preds_n["player_id"] = pd.to_numeric(
+            preds_n["player_id"], errors="coerce"
+        ).astype("Int64")
+        prices_n = prices.copy()
+        prices_n["player_id"] = pd.to_numeric(
+            prices_n["player_id"], errors="coerce"
+        ).astype("Int64")
+        full_pool = preds_n.merge(prices_n, on=["date", "player_id"], how="inner")
+        if not full_pool.empty:
+            full_pool["edge"] = full_pool.apply(
+                lambda r: ev_per_unit(r["p_model"], int(r["over_price"]))
+                if pd.notna(r.get("over_price")) else None,
+                axis=1,
+            )
+
+        existing = None
+        if out_csv.exists():
+            try:
+                existing = pd.read_csv(out_csv)
+            except Exception as e:
+                print(f"  WARN: couldn't read existing {out_csv.name} for merge: {e}")
+                existing = None
+
+        if existing is not None and not existing.empty and "game_pk" in existing.columns:
+            existing["game_pk"] = pd.to_numeric(
+                existing["game_pk"], errors="coerce"
+            ).astype("Int64")
+            existing["player_id"] = pd.to_numeric(
+                existing["player_id"], errors="coerce"
+            ).astype("Int64")
+
+            locked_pks = _locked_game_pks(target_d)
+
+            # Locked picks: carry forward verbatim. Their bets are placed,
+            # the row is already what got bet on, no re-scoring possible.
+            locked_existing = existing[
+                existing["game_pk"].isin(locked_pks)
+            ].copy()
+
+            # Pre-game picks from the existing file: candidates for diff.
+            pregame_existing = existing[
+                ~existing["game_pk"].isin(locked_pks)
+            ].copy()
+
+            # Identity keys for new picks. Latest run wins on overlap.
+            if not recs.empty and "game_pk" in recs.columns:
+                rec_keys = pd.DataFrame({
+                    "game_pk":   pd.to_numeric(recs["game_pk"], errors="coerce").astype("Int64"),
+                    "player_id": pd.to_numeric(recs["player_id"], errors="coerce").astype("Int64"),
+                }).dropna()
+                new_keys = set(zip(
+                    rec_keys["game_pk"].astype(int).tolist(),
+                    rec_keys["player_id"].astype(int).tolist(),
+                ))
+            else:
+                new_keys = set()
+
+            # Diff: existing pre-game picks not in new picks → DROPPED.
+            dropped_rows: list[pd.Series] = []
+            for _, row in pregame_existing.iterrows():
+                try:
+                    key = (int(row["game_pk"]), int(row["player_id"]))
+                except (TypeError, ValueError):
+                    continue
+                if key in new_keys:
+                    continue  # still picked, no need to track
+                rationale = _compute_drop_rationale(
+                    row, full_pool, eff_edge_floor, eff_price_floor,
+                )
+                r_out = row.copy()
+                r_out["drop_reason"] = rationale
+                # Stamp when the drop was observed so multiple re-runs the
+                # same day show their own reasons in chronological order.
+                r_out["dropped_at"] = datetime.now(tz=timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                dropped_rows.append(r_out)
+
+            # Defense: a locked-game row could in theory overlap with new_keys
+            # if --pre-game-only was disabled. Drop any such overlap from
+            # locked_existing so we don't double-count.
+            if not locked_existing.empty:
+                locked_existing = locked_existing.drop_duplicates(
+                    subset=["game_pk", "player_id"], keep="last"
+                )
+                if new_keys:
+                    locked_keep = []
+                    for _, r in locked_existing.iterrows():
+                        try:
+                            k = (int(r["game_pk"]), int(r["player_id"]))
+                        except (TypeError, ValueError):
+                            locked_keep.append(True)
+                            continue
+                        locked_keep.append(k not in new_keys)
+                    locked_existing = locked_existing[locked_keep]
+
+            # Merge: locked + new (latest run wins on overlap by construction).
+            if not locked_existing.empty:
+                # Align columns — recs may have a column locked_existing doesn't,
+                # or vice versa. concat handles that automatically by NaN-filling.
+                recs = pd.concat([locked_existing, recs], ignore_index=True)
+                print(
+                    f"  carried forward {len(locked_existing)} pick(s) from "
+                    f"{len(locked_pks)} locked game(s) (already started/finished)."
+                )
+
+            # Save dropped picks. Append to any existing file from earlier
+            # re-runs the same day so we accumulate the full drop history;
+            # dedupe on (game_pk, player_id) keeping the most recent reason.
+            if dropped_rows:
+                dropped_df = pd.DataFrame(dropped_rows)
+                drop_path = output_path("dropped", f"{d}.csv")
+                drop_path.parent.mkdir(parents=True, exist_ok=True)
+
+                if drop_path.exists():
+                    try:
+                        prev_dropped = pd.read_csv(drop_path)
+                        dropped_df = pd.concat(
+                            [prev_dropped, dropped_df], ignore_index=True,
+                        )
+                        dropped_df = dropped_df.drop_duplicates(
+                            subset=["game_pk", "player_id"], keep="last",
+                        )
+                    except Exception as e:
+                        print(f"  WARN: couldn't append to existing {drop_path.name}: {e}")
+
+                dropped_df.to_csv(drop_path, index=False)
+                print(
+                    f"  {len(dropped_rows)} pick(s) dropped from previous run; "
+                    f"saved to {drop_path.name} (drop_reason column has the why)."
+                )
+
+    # Print summary AFTER the merge so the displayed bet count matches what's
+    # actually written to the CSV (and what the dashboard will fetch).
+    n_bets = len(recs)
+    n_carried = max(0, n_bets - n_new)
+    n_print = n_bets if args.top in (0, None) else min(args.top, n_bets)
+    print(f"\n{'=' * 60}\nRECOMMENDATIONS  {d}  ({label})\n{'=' * 60}")
+    if n_carried:
+        print(f"  {n_bets} bets in final slate "
+              f"({n_new} new + {n_carried} carried-forward from locked games; "
+              f"{'all' if n_print == n_bets else f'top {n_print}'} shown below; "
+              f"full list in CSV).")
+    else:
+        print(f"  {n_bets} bets cleared the filter "
+              f"({'all' if n_print == n_bets else f'top {n_print}'} shown below; "
+              f"full list in CSV).")
+    if n_bets:
+        print(recs.head(n_print).to_string(index=False))
+
+    # Final write.
+    recs.to_csv(out_csv, index=False)

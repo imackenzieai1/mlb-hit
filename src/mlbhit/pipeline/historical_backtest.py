@@ -126,7 +126,7 @@ def backtest(
     end: date,
     edge_min: float = 0.05,
     stake: float = 1.0,
-    book_preference: tuple[str, ...] = ("draftkings", "fanduel"),
+    book_preference: tuple[str, ...] = ("fanduel", "draftkings"),
     model_name: str | None = None,
     filter_e: bool = False,
     require_pitcher: bool = False,
