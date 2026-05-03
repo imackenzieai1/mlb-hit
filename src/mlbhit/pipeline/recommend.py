@@ -191,24 +191,30 @@ def _load_schedule_for_date(target_date: date) -> pd.DataFrame | None:
         return None
 
 
-def _format_first_pitch_et(game_datetime_utc) -> str:
-    """Format a UTC ISO datetime as a short Eastern Time string (e.g. '7:05 PM ET').
+def _format_first_pitch_ct(game_datetime_utc) -> str:
+    """Format a UTC ISO datetime as a short Central Time string (e.g. '6:05 PM CT').
     Returns empty string for invalid input.
 
-    NOTE: Uses zoneinfo for proper EDT/EST handling — direct subtraction would
-    silently wrong-shift during DST transitions. This is critical for users
-    who bet near transition boundaries (Mar / Nov).
+    Switched from Eastern → Central 2026-05-03 to match the operator's local
+    timezone. Uses zoneinfo for proper CDT/CST handling — direct subtraction
+    would silently wrong-shift during DST transitions, which matters for
+    users betting near transition boundaries (Mar / Nov).
     """
     if game_datetime_utc is None or pd.isna(game_datetime_utc):
         return ""
     try:
         from zoneinfo import ZoneInfo
         ts = pd.to_datetime(game_datetime_utc, utc=True)
-        et = ts.tz_convert(ZoneInfo("America/New_York"))
+        ct = ts.tz_convert(ZoneInfo("America/Chicago"))
         # %-I strips the leading zero on hour; works on macOS/Linux glibc.
-        return et.strftime("%-I:%M %p ET")
+        return ct.strftime("%-I:%M %p CT")
     except Exception:
         return ""
+
+
+# Backwards-compat alias. recommend.py used to expose this function name; any
+# external code that imports it still works, just produces CT now.
+_format_first_pitch_et = _format_first_pitch_ct
 
 
 def _pregame_game_pks(target_date: date) -> set[int] | None:
@@ -506,10 +512,12 @@ def recommend(
         m = m[m["edge"] >= EDGE_MIN]
 
     # Attach first-pitch time per pick. The schedule parquet has game_datetime
-    # in UTC; we surface a human-readable ET string in `first_pitch_et` so the
-    # email digest and dashboard can show "7:05 PM ET" without re-deriving it.
+    # in UTC; we surface a human-readable CT string in `first_pitch_ct` so the
+    # email digest and dashboard can show "6:05 PM CT" without re-deriving it.
     # Critical for the user knowing which picks have already locked-in vs which
     # are evening games still open for action.
+    # NOTE: column was `first_pitch_et` (Eastern) prior to 2026-05-03; old CSVs
+    # still have the ET column. Dashboard + digest read both for back-compat.
     if drop_postponed_for_date is not None and "game_pk" in m.columns:
         sched = _load_schedule_for_date(drop_postponed_for_date)
         if sched is not None and "game_pk" in sched.columns and "game_datetime" in sched.columns:
@@ -518,7 +526,7 @@ def recommend(
                 .drop_duplicates(subset=["game_pk"], keep="first")
             )
             m = m.merge(time_map, on="game_pk", how="left")
-            m["first_pitch_et"] = m["game_datetime"].apply(_format_first_pitch_et)
+            m["first_pitch_ct"] = m["game_datetime"].apply(_format_first_pitch_ct)
             # Sort by first-pitch time so closest games appear first — matters
             # for the cron's mid-day re-run when some games are minutes from
             # locking and others are hours away.

@@ -480,9 +480,11 @@
         // First-pitch ET label — surfaces game time so user can see "lock in
         // by 1:35pm vs evening pick at 7:05pm". Empty when schedule data
         // wasn't available at recommend-time (rare).
-        const firstPitch = pick(r, ["first_pitch_et"]);
+        // Prefer first_pitch_ct (post-2026-05-03 schema); fall back to
+        // first_pitch_et for older CSVs that haven't been re-graded yet.
+        const firstPitch = pick(r, ["first_pitch_ct", "first_pitch_et"]);
         const pitchHtml = firstPitch
-          ? `<span class="pitch-time" title="First pitch (Eastern Time)">${firstPitch}</span>`
+          ? `<span class="pitch-time" title="First pitch time">${firstPitch}</span>`
           : "";
         return `
           <div class="row">
@@ -522,9 +524,11 @@
         const ha   = pick(r, ["home_away"]);
         const haSym = ha === "A" ? "@" : ha === "H" ? "vs" : "·";
         const reason = r.drop_reason || "(no reason recorded)";
-        const firstPitch = pick(r, ["first_pitch_et"]);
+        // Prefer first_pitch_ct (post-2026-05-03 schema); fall back to
+        // first_pitch_et for older CSVs that haven't been re-graded yet.
+        const firstPitch = pick(r, ["first_pitch_ct", "first_pitch_et"]);
         const pitchHtml = firstPitch
-          ? `<span class="pitch-time" title="First pitch (Eastern Time)">${firstPitch}</span>`
+          ? `<span class="pitch-time" title="First pitch time">${firstPitch}</span>`
           : "";
         const edgeStr = r.edge ? fmtPct(r.edge) : "";
         const priceStr = r.over_price ? fmtPrice(r.over_price) : "";

@@ -29,9 +29,11 @@ RECS_DIR = REPO_ROOT / "data" / "output" / "recommendations"
 # pristine schema. The first matching alias wins; missing columns are
 # silently skipped.
 PREFERRED_COLS: list[tuple[str, list[str]]] = [
-    # First pitch in ET — surfaced first so the user knows immediately whether
-    # a pick is locking in soon (1pm game) or hours away (7pm game).
-    ("first_pitch",   ["first_pitch_et"]),
+    # First pitch in CT — surfaced first so the user knows immediately whether
+    # a pick is locking in soon (1pm game) or hours away (7pm game). Prefer
+    # the new first_pitch_ct column (post-2026-05-03); fall back to the legacy
+    # first_pitch_et for older CSVs that haven't been re-graded yet.
+    ("first_pitch",   ["first_pitch_ct", "first_pitch_et"]),
     ("player",        ["player_name", "player_name_x", "player_name_y"]),
     ("team",          ["team"]),
     ("opp",           ["opp_team", "opponent"]),
