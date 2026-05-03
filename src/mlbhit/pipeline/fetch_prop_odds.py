@@ -381,11 +381,204 @@ def fetch_draftkings_hit_props(target_date: date) -> pd.DataFrame:
     raise NotImplementedError("Use --source theodds instead.")
 
 
+# ---------------------------------------------------------------------------
+# SharpAPI source
+# ---------------------------------------------------------------------------
+# SharpAPI exposes a unified MLB odds feed at /api/v1/odds with player props
+# included as `market_type=player_hits`. The schema differs from the-odds-api:
+#   * One row per (sportsbook, player, line, side) — we pivot Over/Under into
+#     a single row per (player, book) at line=0.5.
+#   * Player name lives in `player_name` (not buried in `description`).
+#   * `is_live=False` is reliable for filtering pre-game lines.
+#   * Combo props ("Trout & Soler 2+ Combined Hits") have selection != "Over"/
+#     "Under" — we exclude those by requiring the selection_type sentinel.
+#
+# Switched on 2026-05-02 after the-odds-api's FanDuel feed was found to
+# disagree with the live FD app by 10–25 cents — the source of much grief.
+# Auth: X-API-Key header. Key in .env as SHARPAPI_KEY=sk_live_...
+SHARPAPI_BASE = "https://api.sharpapi.io/api/v1"
+SHARPAPI_PAGE_LIMIT = 100   # API caps somewhere around 100; tune up if allowed.
+
+
+def fetch_sharpapi_hit_props(target_date: date) -> pd.DataFrame:
+    """Fetch MLB 1+ hits props from SharpAPI for `target_date`.
+
+    Filters applied:
+      * league=MLB, market=player_hits
+      * line=0.5 (the 1+ hits equivalent)
+      * is_live=False (skip in-progress games)
+      * single-player props only (drops "Combined Hits" combos)
+
+    Output columns match the-odds-api fetcher: date, player_id, player_name,
+    book, over_price, under_price, fetched_at. Downstream pipeline doesn't
+    care which source produced the parquet.
+
+    Requires env var SHARPAPI_KEY (set in .env).
+    """
+    api_key = env("SHARPAPI_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "SHARPAPI_KEY not found. Add to .env:\n    SHARPAPI_KEY=sk_live_xxx"
+        )
+
+    fetched_at = datetime.now(timezone.utc).isoformat()
+
+    # Paginate. SharpAPI returns has_more + next_offset in the pagination block,
+    # but in practice has_more=True on the last page and the next request 400s.
+    # Defensive: stop when a page returns fewer rows than the limit, OR when a
+    # request returns a 4xx (which we treat as end-of-data, not a fatal error).
+    rows: list[dict] = []
+    offset = 0
+    pages = 0
+    while True:
+        r = requests.get(
+            f"{SHARPAPI_BASE}/odds",
+            headers={"X-API-Key": api_key},
+            params={
+                "league": "MLB",
+                "market": "player_hits",
+                "limit": SHARPAPI_PAGE_LIMIT,
+                "offset": offset,
+            },
+            timeout=20,
+        )
+        if r.status_code == 400:
+            # Past the end of the result set — SharpAPI returns 400 when the
+            # offset is out of range. Treat as end-of-data and stop cleanly.
+            break
+        if r.status_code >= 500:
+            # Real server error — surface it.
+            r.raise_for_status()
+        if r.status_code >= 400:
+            # Other 4xx (auth, rate limit, etc.) — surface so we don't
+            # silently swallow real misconfigurations.
+            r.raise_for_status()
+        body = r.json()
+        page_rows = body.get("data", [])
+        rows.extend(page_rows)
+        pages += 1
+
+        # Stop conditions, in order:
+        #   1. Page came back smaller than the requested limit → last page.
+        #   2. Pagination block says no more.
+        #   3. Defensive cap: prevent infinite loop on a buggy response.
+        if len(page_rows) < SHARPAPI_PAGE_LIMIT:
+            break
+        pag = body.get("pagination", {}) or {}
+        if not pag.get("has_more"):
+            break
+        next_off = pag.get("next_offset")
+        if next_off is None:
+            offset += len(page_rows)
+        else:
+            offset = next_off
+        if pages > 100 or len(rows) > 50_000:
+            print(f"  WARN: paginate cutoff at pages={pages} rows={len(rows)}")
+            break
+
+    print(f"  SharpAPI returned {len(rows)} player_hits rows across {pages} page(s).")
+    if not rows:
+        return pd.DataFrame()
+
+    raw = pd.DataFrame(rows)
+
+    # 1. Pre-game only. is_live=True means the game has already started; the
+    #    book has re-priced to "remaining PAs" rather than full game, so the
+    #    line means something different than what the model assumes.
+    before = len(raw)
+    raw = raw[raw["is_live"].fillna(False) == False].copy()
+    print(f"  is_live filter: {len(raw):,}/{before:,} rows kept (dropped in-progress games)")
+
+    # 2. 1+ hits line only (line=0.5). The API also returns 1.5/2.5/3.5/4.5 — we
+    #    don't model those today.
+    before = len(raw)
+    raw = raw[raw["line"] == 0.5].copy()
+    print(f"  line=0.5 filter: {len(raw):,}/{before:,} rows kept (dropped alt lines)")
+
+    # 3. Single-player props only. Combo rows look like:
+    #       selection: "Trout & Soler 4+ Combined Hits"
+    #       selection_type: "over" (or unique)
+    #    Standard player rows have selection ∈ {"Over", "Under"} and a clean
+    #    player_name. Drop anything where selection isn't Over/Under.
+    before = len(raw)
+    raw = raw[raw["selection"].isin(["Over", "Under"])].copy()
+    print(f"  Over/Under filter: {len(raw):,}/{before:,} rows kept (dropped combo props)")
+
+    # 4. Drop "Extra Base" markets. SharpAPI lumps FanDuel's "Extra Base Hit"
+    #    market (doubles+triples+HRs only — singles don't count) under the
+    #    same player_hits market_type, disambiguated by appending " Extra Base"
+    #    to the player_name. Those prices are for a different bet than what
+    #    our model predicts (P(1+ hit including singles)) — using them would
+    #    silently corrupt the edge calculation.
+    before = len(raw)
+    raw = raw[~raw["player_name"].astype(str).str.contains(
+        "Extra Base|Combined|\\+|/|&", case=False, na=False, regex=True,
+    )].copy()
+    print(f"  single-player filter: {len(raw):,}/{before:,} rows kept "
+          f"(dropped Extra Base / combos / multi-player)")
+
+    # 5. Sportsbooks the user has subscribed to. (FD and DK in practice today;
+    #    HardRock/Fanatics/Caesars don't appear in MLB player_hits coverage.)
+    raw = raw[raw["sportsbook"].notna()].copy()
+    if not raw.empty:
+        print(f"  per-book counts at line=0.5: "
+              f"{dict(raw['sportsbook'].value_counts())}")
+
+    # 5. Pivot Over/Under into a single row per (player, book). Each row in raw
+    #    is one side of one player's prop at one book; we want both sides on
+    #    one row so the existing parquet schema works downstream.
+    if raw.empty:
+        return pd.DataFrame()
+
+    raw["player_name"] = raw["player_name"].astype(str).str.strip()
+    pivot = (
+        raw.pivot_table(
+            index=["player_name", "sportsbook", "event_id",
+                   "home_team", "away_team", "event_start_time"],
+            columns="selection",
+            values="odds_american",
+            aggfunc="first",
+        )
+        .reset_index()
+        .rename(columns={"Over": "over_price", "Under": "under_price",
+                         "sportsbook": "book"})
+    )
+
+    # Stamp the target date (UTC). event_start_time can cross midnight UTC for
+    # late-night West Coast games, but the user's slate is always defined by
+    # the calendar date they ran the workflow with.
+    pivot["date"] = target_date.isoformat()
+    pivot["fetched_at"] = fetched_at
+
+    # 6. Match player_name to mlbam_id via players.parquet — same path the
+    #    the-odds-api fetcher uses. Names should already be clean from SharpAPI.
+    pivot = _match_player_ids(pivot, _load_player_map())
+    pivot["player_id"] = pivot["mlbam_id"].astype("Int64")
+
+    # 7. Final schema match. Keep the columns recommend.py + downstream expect.
+    out_cols = [
+        "date", "player_id", "player_name", "book",
+        "over_price", "under_price", "fetched_at",
+    ]
+    out = pivot[out_cols].dropna(subset=["player_id"]).reset_index(drop=True)
+    out_path = raw_path("props", f"{target_date.isoformat()}_props.parquet")
+    out.to_parquet(out_path, index=False)
+    print(f"{len(out)} props written -> {out_path.name}")
+
+    if not out.empty:
+        # Show a sample so the user can spot-check against FD/DK app prices.
+        print(out.head(15).to_string(index=False))
+
+    return out
+
+
 def load_props(target_date: date, source: str = "csv") -> pd.DataFrame:
     if source == "csv":
         return load_manual_csv(target_date)
     if source == "theodds":
         return fetch_theodds_hit_props(target_date)
+    if source == "sharpapi":
+        return fetch_sharpapi_hit_props(target_date)
     if source == "draftkings":
         return fetch_draftkings_hit_props(target_date)
     raise ValueError(f"Unknown source: {source}")
@@ -409,7 +602,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str, default=None, help="YYYY-MM-DD (default: today)")
     parser.add_argument(
-        "--source", choices=["csv", "theodds", "draftkings"], default="theodds",
+        "--source",
+        choices=["csv", "theodds", "sharpapi", "draftkings"],
+        default="sharpapi",
     )
     parser.add_argument(
         "--make-template", action="store_true",

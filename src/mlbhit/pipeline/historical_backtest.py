@@ -196,8 +196,18 @@ def backtest(
         lambda px: american_to_decimal(int(px)) if pd.notna(px) else np.nan
     )
 
-    # One bet per (date, player_id). Prefer DK when both books have a line;
-    # otherwise fall back to FD. This matches your real-world line-shop.
+    # Strict book filter: only rows whose `book` is in book_preference survive.
+    # With FD-only this drops any DraftKings line entirely, so the backtest
+    # measures ROI against the same book the user is actually betting at.
+    # Then dedupe to one bet per (date, player_id), tiebreaking on book_rank
+    # in case the same book somehow returned multiple lines for one player.
+    if not m.empty:
+        before = len(m)
+        m = m[m["book"].isin(book_preference)].copy()
+        if before and len(m) < before:
+            print(f"  book filter ({list(book_preference)}): "
+                  f"{len(m):,}/{before:,} rows kept "
+                  f"(dropped {before - len(m):,} rows from other books).")
     m["book_rank"] = m["book"].map({b: i for i, b in enumerate(book_preference)}).fillna(99)
     one_per_player = (
         m.sort_values(["date", "player_id", "book_rank"])

@@ -45,6 +45,7 @@ jobs:
 
     env:
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      SHARPAPI_KEY: ${{ secrets.SHARPAPI_KEY }}
       MAILGUN_API_KEY: ${{ secrets.MAILGUN_API_KEY }}
       MAILGUN_DOMAIN: ${{ secrets.MAILGUN_DOMAIN }}
       DIGEST_TO: ${{ secrets.DIGEST_TO }}
@@ -119,7 +120,7 @@ jobs:
         run: |
           python -m mlbhit.pipeline.fetch_prop_odds \
             --date ${{ steps.target.outputs.date }} \
-            --source theodds
+            --source sharpapi
 
       - name: Generate Filter E recommendations
         # --pre-game-only: if any games on the target date have already

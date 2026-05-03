@@ -65,10 +65,17 @@ POSTPONED_STATUSES = {"Postponed"}
 FILTER_E_EDGE_MIN = 0.11445569939746027
 FILTER_E_PRICE_MIN = -240
 
-# Book preference for line dedupe. When the same player has prop odds from
-# multiple books in the prop_prices parquet, the first book listed wins.
-# Switched to FD-first 2026-05-02 (was DK-first since the project's start).
-# historical_backtest.py and scripts/optuna_joint.py mirror this ordering.
+# Books we accept odds from. Strict allowlist: any row whose `book` isn't in
+# this tuple gets dropped before the gate. The first book listed wins on the
+# dedupe when the same player has lines from multiple books in the parquet.
+# Lineage:
+#   v1 (project start)    DK + FD, DK-primary
+#   v2 (2026-05-02 AM)    DK + FD, FD-primary
+#   v3 (brief)            FD-only
+#   v4 (2026-05-02 PM)    DK + FD, FD-primary — kept DK as fallback for
+#                         players FD doesn't cover, since price-freshness
+#                         (not book) was the real source of "model price
+#                         doesn't match the FD app" complaints.
 BOOK_PREFERENCE: tuple[str, ...] = ("fanduel", "draftkings")
 
 # Minimum recent start frequency for a projected (un-confirmed) lineup row to
@@ -459,12 +466,25 @@ def recommend(
 
     m = preds.merge(prop_prices, on=["date", "player_id"], how="inner")
 
-    # When prop_prices has lines from multiple books for the same player, dedupe
-    # to one row per (date, player_id) using BOOK_PREFERENCE order — FD wins
-    # over DK by default, with both treated as fallback for any other book.
-    # Without this step the merge produces 1-row-per-(player, book), which
-    # would inflate the bet count and double-count the same player's hit.
+    # Book filter + dedupe. Two things happening here:
+    #   1. Strict isin(BOOK_PREFERENCE) drops any row whose `book` isn't in
+    #      our allowlist. Currently FD-only — any DK lines in the parquet
+    #      get cut here, so we don't accidentally show DK prices when the
+    #      user wants to bet at FD.
+    #   2. If a player still has multiple FD lines (shouldn't happen, but
+    #      defensive), the dedupe keeps one row per (date, player_id) using
+    #      BOOK_PREFERENCE order as the tiebreaker.
+    # Without these steps the merge would produce 1-row-per-(player, book),
+    # inflating bet count and double-counting the same player's hit.
     if "book" in m.columns and not m.empty:
+        before_book_filter = len(m)
+        m = m[m["book"].isin(BOOK_PREFERENCE)].copy()
+        if before_book_filter and len(m) < before_book_filter:
+            print(
+                f"  book filter ({list(BOOK_PREFERENCE)}): "
+                f"{len(m)}/{before_book_filter} rows kept "
+                f"(dropped {before_book_filter - len(m)} rows from other books)."
+            )
         m["book_rank"] = m["book"].map(
             {b: i for i, b in enumerate(BOOK_PREFERENCE)}
         ).fillna(99)

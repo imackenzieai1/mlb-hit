@@ -36,10 +36,14 @@ def _should_blend(target_date: date) -> bool:
 def _resolve_odds_source(explicit: str | None) -> str | None:
     """Decide where to get odds from today.
 
-    Priority: --odds-source flag > ODDS_API_KEY env > manual CSV on disk > none.
+    Priority: --odds-source flag > SHARPAPI_KEY env > ODDS_API_KEY env > none.
+    SharpAPI is preferred when both are set — its FD/DK coverage is fresher
+    and more complete than the-odds-api's free-tier feed.
     """
     if explicit:
         return explicit
+    if env("SHARPAPI_KEY"):
+        return "sharpapi"
     if env("ODDS_API_KEY"):
         return "theodds"
     return None
@@ -66,7 +70,7 @@ def main():
     parser.add_argument("--date", type=str, default=None, help="YYYY-MM-DD (default: today)")
     parser.add_argument(
         "--odds-source",
-        choices=["csv", "theodds"],
+        choices=["csv", "theodds", "sharpapi"],
         default=None,
         help="Where to pull today's prop prices from. Defaults to theodds if "
              "ODDS_API_KEY is set, otherwise model-only.",
